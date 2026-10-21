@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import ForceGraph2D from 'react-force-graph-2d';
+import ForceGraph2D, { ForceGraphMethods } from 'react-force-graph-2d';
 
 type GNode = {
   id: string;
@@ -42,7 +42,10 @@ export default function App() {
   const [data, setData] = useState<WireData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [hover, setHover] = useState<GNode | null>(null);
-  const sizeRef = useRef<{ w: number; h: number }>({ w: 600, h: 480 });
+  // Canvas size lives in state, not a ref: the graph re-renders when it
+  // changes. A ref would keep the canvas at its initial 600x480 and leave
+  // the graph crammed into the top-left corner of the viewport.
+  const [size, setSize] = useState<{ w: number; h: number }>({ w: 600, h: 480 });
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
   // re-frame wire payload as the d3-style shape that react-force-graph-2d
@@ -63,15 +66,21 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // The wrapper div must exist for the observer to attach, so this effect
+    // re-runs once the graph payload arrives and the tree is rendered.
     if (!wrapRef.current) return;
-    const ro = new ResizeObserver(() => {
+    const measure = () => {
       if (!wrapRef.current) return;
       const rect = wrapRef.current.getBoundingClientRect();
-      sizeRef.current = { w: rect.width, h: rect.height };
-    });
+      if (rect.width > 0 && rect.height > 0) {
+        setSize({ w: rect.width, h: rect.height });
+      }
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
     ro.observe(wrapRef.current);
     return () => ro.disconnect();
-  }, []);
+  }, [data]);
 
   const linkColor = useMemo(() => (l: object) => {
     const t = (l as GLink).type;
@@ -80,35 +89,30 @@ export default function App() {
 
   if (error) {
     return (
-      <div style={styles.status}>Graph load failed: {error}</div>
+      <div ref={wrapRef} style={styles.root}>
+        <div style={styles.status}>Graph load failed: {error}</div>
+      </div>
     );
   }
   if (!data || !forceData) {
-    return <div style={styles.status}>Loading graph…</div>;
-  }
-  if (data.degraded) {
     return (
       <div ref={wrapRef} style={styles.root}>
-        <div style={styles.banner}>
-          Degraded mode: {data.note ?? 'rendering top-N by size'}
-        </div>
-        <Graph
-          data={forceData}
-          hover={hover}
-          setHover={setHover}
-          sizeRef={sizeRef}
-          linkColor={linkColor}
-        />
+        <div style={styles.status}>Loading graph…</div>
       </div>
     );
   }
   return (
     <div ref={wrapRef} style={styles.root}>
+      {data.degraded ? (
+        <div style={styles.banner}>
+          Degraded mode: {data.note ?? 'rendering top-N by size'}
+        </div>
+      ) : null}
       <Graph
         data={forceData}
         hover={hover}
         setHover={setHover}
-        sizeRef={sizeRef}
+        size={size}
         linkColor={linkColor}
       />
     </div>
@@ -119,21 +123,30 @@ function Graph({
   data,
   hover,
   setHover,
-  sizeRef,
+  size,
   linkColor,
 }: {
   data: ForceData;
   hover: GNode | null;
   setHover: (n: GNode | null) => void;
-  sizeRef: React.MutableRefObject<{ w: number; h: number }>;
+  size: { w: number; h: number };
   linkColor: (l: object) => string;
 }): JSX.Element {
+  const fgRef = useRef<ForceGraphMethods | undefined>(undefined);
   return (
     <>
       <ForceGraph2D
+        ref={fgRef}
         graphData={data}
-        width={sizeRef.current.w}
-        height={sizeRef.current.h}
+        width={size.w}
+        height={size.h}
+        onEngineStop={() => {
+          // Fit the whole graph into view once the layout settles.
+          const fg = fgRef.current;
+          if (fg) {
+            fg.zoomToFit(600, 80);
+          }
+        }}
         linkColor={linkColor}
         linkWidth={(l: object) => Math.max(1, Math.min(4, (l as GLink).weight))}
         nodeLabel={(n: object) => {
@@ -145,8 +158,35 @@ function Graph({
         nodeColor={(n: object) =>
           (n as GNode).dangling ? DANGLE_COLOR : NODE_COLOR
         }
-        nodeRelSize={4}
+        nodeRelSize={6}
         nodeVal={(n: object) => Math.max(1, (n as GNode).size / 50)}
+        nodeCanvasObject={(n: object, ctx: CanvasRenderingContext2D, scale: number) => {
+          // Providing nodeCanvasObject replaces the library's default node
+          // drawing entirely, so we must draw the circle ourselves as well as
+          // the label (react-force-graph-2d draws no labels by default).
+          const node = n as GNode & { x?: number; y?: number };
+          const x = node.x ?? 0;
+          const y = node.y ?? 0;
+          const r = Math.max(3.5, Math.min(11, 1.5 + Math.sqrt(node.size) / 5));
+
+          ctx.beginPath();
+          ctx.arc(x, y, r, 0, 2 * Math.PI);
+          ctx.fillStyle = node.dangling ? DANGLE_COLOR : NODE_COLOR;
+          ctx.fill();
+          if (node.dangling) {
+            ctx.strokeStyle = DANGLE_COLOR;
+            ctx.lineWidth = 1 / scale;
+            ctx.stroke();
+          }
+
+          const label = node.title ?? node.label;
+          const fontSize = Math.max(11 / scale, 3.2);
+          ctx.font = `${fontSize}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          ctx.fillStyle = '#1a1a1a';
+          ctx.fillText(label, x, y + r + 1.5 / scale);
+        }}
         onNodeHover={(n) => setHover((n as GNode) ?? null)}
         cooldownTicks={120}
       />

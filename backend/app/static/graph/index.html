@@ -4,7 +4,23 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Knowledge Graph</title>
-    <script type="module" crossorigin src="/assets/index-ibsT1rZs.js"></script>
+    <style>
+      /* Reset so the force graph fills the viewport: the app root is
+         position:absolute; inset:0 and needs a full-height, margin-free
+         containing block. */
+      html,
+      body,
+      #root {
+        height: 100%;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        overflow: hidden;
+        background: #fafafa;
+      }
+    </style>
+    <script type="module" crossorigin src="/static/graph/assets/index-B1fFehoR.js"></script>
   </head>
   <body>
     <div id="root"></div>

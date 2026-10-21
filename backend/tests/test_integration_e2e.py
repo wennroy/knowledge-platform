@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -879,6 +880,72 @@ class TestFGraph:
             e["source"] == "team/alpha.md" and e["target"] == "team/beta.md"
             for e in wl_edges
         ), f"wikilink edges: {wl_edges}"
+
+    def test_f1b_bare_basename_wikilink_resolves_to_real_file(
+        self, raw_client: TestClient, tmp_path: Path
+    ):
+        """F1b: a bare-basename wikilink resolves to the real file.
+
+        Wikilinks are authored Obsidian-style as ``[[beta]]`` while node ids
+        are vault-relative paths (``team/beta.md``). The resolver must match
+        on basename, otherwise every such link spawns a dangling placeholder
+        and the wikilink edges point at phantom nodes.
+        """
+        vault_path = tmp_path / "vault"
+        self._write_md(
+            vault_path, "team/alpha.md", "# Alpha\n\nSee [[beta]] and [[gamma]].",
+            fm={"title": "Alpha"},
+        )
+        self._write_md(
+            vault_path, "team/beta.md", "# Beta\n\nBody.", fm={"title": "Beta"}
+        )
+        self._write_md(
+            vault_path, "team/gamma.md", "# Gamma\n\nBody.", fm={"title": "Gamma"}
+        )
+        body = raw_client.get("/graph").json()
+        ids = {n["id"] for n in body["nodes"]}
+        dangling = {n["id"] for n in body["nodes"] if n.get("dangling")}
+
+        # No phantom nodes for links that do resolve.
+        assert "beta" not in ids, f"bare link created a phantom node: {ids}"
+        assert "gamma" not in ids, f"bare link created a phantom node: {ids}"
+        assert not dangling, f"unexpected dangling nodes: {dangling}"
+
+        wl_edges = [e for e in body["edges"] if e.get("type") == "wikilink"]
+        assert any(
+            e["source"] == "team/alpha.md" and e["target"] == "team/beta.md"
+            for e in wl_edges
+        ), f"wikilink edges: {wl_edges}"
+        assert any(
+            e["source"] == "team/alpha.md" and e["target"] == "team/gamma.md"
+            for e in wl_edges
+        ), f"wikilink edges: {wl_edges}"
+
+    def test_f1c_graph_spa_assets_are_served(
+        self, raw_client: TestClient
+    ):
+        """F1c: the built SPA's JS/CSS assets actually resolve under /static/graph/.
+
+        Regression guard: with Vite's default ``base: '/'`` the built
+        index.html referenced ``/assets/x.js``, which 404s because the bundle
+        is mounted at ``/static/graph/`` — the page rendered blank while the
+        HTML still returned 200.
+        """
+        index = raw_client.get("/static/graph/")
+        assert index.status_code == 200, index.text
+        html = index.text
+        # Every referenced asset must be under the mount prefix and resolve.
+        refs = re.findall(r'(?:src|href)="([^"]+)"', html)
+        assert refs, "index.html references no assets"
+        for ref in refs:
+            if ref.startswith("http"):
+                continue
+            assert ref.startswith("/static/graph/"), (
+                f"asset {ref} is not under the /static/graph/ mount prefix; "
+                "vite `base` must be set to '/static/graph/'"
+            )
+            asset = raw_client.get(ref)
+            assert asset.status_code == 200, f"asset {ref} -> {asset.status_code}"
 
     def test_f2_node_hover_fields_include_title_path_summary(
         self, raw_client: TestClient, tmp_path: Path

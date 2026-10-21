@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -58,12 +59,18 @@ app.include_router(admin_index.router)
 app.include_router(chat.router)
 app.include_router(graph.router)
 
-# Static mount for the graph-viewer SPA (vite build output)
-app.mount(
-    "/static/graph",
-    StaticFiles(directory="app/static/graph", html=True),
-    name="graph-spa",
-)
+# Static mount for the graph-viewer SPA (vite build output).
+# The directory is resolved from this file, not from the process cwd, so the
+# mount works regardless of where uvicorn was started from.
+_GRAPH_SPA_DIR = Path(__file__).resolve().parent / "static" / "graph"
+if _GRAPH_SPA_DIR.is_dir():
+    app.mount(
+        "/static/graph",
+        StaticFiles(directory=str(_GRAPH_SPA_DIR), html=True),
+        name="graph-spa",
+    )
+else:  # pragma: no cover - only when the SPA has not been built yet
+    log.warning("graph SPA not built at %s; /static/graph/ not mounted", _GRAPH_SPA_DIR)
 
 
 @app.get("/healthz")

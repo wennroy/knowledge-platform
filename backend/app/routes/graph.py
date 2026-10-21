@@ -94,17 +94,33 @@ def _build_graph() -> dict[str, Any]:
             if target:
                 wikilink_edges.append((rel, target))
 
-    # Resolve wikilink targets against the real-file id set first (with or
-    # without ``.md``); only spawn a dangling placeholder if neither form maps
-    # to an existing note.
+    # Resolve wikilink targets against the real-file id set. Wikilinks are
+    # written as bare basenames (Obsidian style), e.g. ``[[tech-stack]]``,
+    # while node ids are vault-relative paths (``team/tech-stack.md``).
+    # So we match on: exact relative path -> path with/without .md ->
+    # unique basename match. Only then do we spawn a dangling placeholder.
     real_ids = set(nodes.keys())
+    by_stem: dict[str, list[str]] = defaultdict(list)
+    for rid in real_ids:
+        by_stem[Path(rid).stem].append(rid)
 
     def _resolve(target: str) -> str:
+        # 1. exact relative path
         if target in real_ids:
             return target
+        # 2. relative path with/without .md
         with_md = target if target.endswith(".md") else f"{target}.md"
         if with_md in real_ids:
             return with_md
+        # 3. basename match (the common case for [[tech-stack]])
+        stem = target[:-3] if target.endswith(".md") else target
+        candidates = by_stem.get(stem, [])
+        if len(candidates) == 1:
+            return candidates[0]
+        if candidates:
+            # Ambiguous: prefer the shortest path (closest to vault root),
+            # then lexicographic — deterministic and usually the intended one.
+            return sorted(candidates, key=lambda p: (p.count("/"), p))[0]
         return target
 
     for _, target in wikilink_edges:
