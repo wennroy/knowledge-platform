@@ -1,0 +1,40 @@
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/backend.Dockerfile
+    restart: unless-stopped
+    env_file: ../backend/.env
+    # Override paths to match the volume mounts below (relative paths in .env
+    # resolve to /Users/b/backend/... inside the container, which is ephemeral).
+    environment:
+      VAULT_PATH: /data/vault
+      LANCEDB_PATH: /data/lancedb
+    volumes:
+      - ../vault:/data/vault
+      - lancedb:/data/lancedb
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    restart: unless-stopped
+    environment:
+      OPENAI_API_BASE_URL: http://backend:8000/v1
+      OPENAI_API_KEY: any
+    volumes:
+      - open-webui:/app/backend/data
+    ports:
+      - "127.0.0.1:3000:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  lancedb:
+  open-webui:

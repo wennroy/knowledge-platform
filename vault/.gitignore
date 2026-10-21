@@ -1,0 +1,3 @@
+.staging/
+*.log
+.DS_Store

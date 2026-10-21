@@ -1,0 +1,74 @@
+# Knowledge Platform reverse-proxy config.
+#
+# Listens on 80 (HTTP, auto-redirect to HTTPS) and 443 (HTTPS).
+# Caddy obtains and renews certificates automatically when the hostnames
+# below resolve to this server's public IP.
+#
+# Authentication and tunnel exposure (Basic Auth / Cloudflare Tunnel / etc.)
+# are intentionally left to the operator to choose. Common choices:
+#   - Cloudflare Tunnel: terminates TLS at the edge; point the tunnel
+#     at 127.0.0.1:80 or 127.0.0.1:443 on this host.
+#   - Basic Auth via Caddy: add `basicauth` blocks per route or globally
+#     via the `handle` directive (see https://caddyserver.com/docs/caddyfile/directives/basicauth).
+
+# ---------- public HTTPS ----------
+example.com, www.example.com {
+    encode zstd gzip
+
+    # F-02 fix: enforce an authentication baseline.
+    # Choose ONE of the two auth layers below by uncommenting:
+    #
+    # (1) Basic Auth — set Caddy_Basicauth_Hash in the environment, e.g.:
+    #       docker run -e Caddy_Basicauth_Hash=$(caddy hash-password --plaintext 'secret')
+    #     then this block authenticates every request:
+    basicauth {
+        {$Caddy_Basicauth_Hash}
+    }
+    #
+    # (2) IP allowlist — only useful on a private network:
+    #     @blocked not remote_ip 10.0.0.0/8 192.168.0.0/16 172.16.0.0/12
+    #     respond @blocked "Forbidden" 403
+    #
+    # In both cases the /healthz probe is left open so orchestrators can
+    # reach it without credentials.
+
+    # Open WebUI (chat UI)
+    reverse_proxy open-webui:8080
+
+    # Knowledge platform backend routes
+    reverse_proxy /v1/*       backend:8000
+    reverse_proxy /admin/*    backend:8000
+    reverse_proxy /metrics    backend:8000
+    reverse_proxy /healthz    backend:8000 {
+        # Health probe bypasses auth so orchestrators don't need creds.
+    }
+    reverse_proxy /static/graph/* backend:8000
+
+    # Graph viewer SPA + its data API both fall under /graph.
+    handle /graph* {
+        reverse_proxy backend:8000
+    }
+
+    # Optional: tighten CSP / IP allowlist etc. here.
+}
+
+# ---------- plaintext :80 ----------
+# Caddy will issue a cert for any hostname that resolves here on :443 above.
+# A bare :80 listener is sufficient for ACME http-01 challenges and for
+# tunneling clients that terminate TLS upstream (e.g. cloudflared).
+:80 {
+    # Health probe for the platform itself.
+    reverse_proxy /healthz backend:8000
+
+    # Tunnel target for Open WebUI (when the edge does TLS).
+    reverse_proxy open-webui:8080
+
+    # Tunnels for the backend API/UI routes.
+    reverse_proxy /v1/*    backend:8000
+    reverse_proxy /admin/* backend:8000
+    reverse_proxy /metrics backend:8000
+    reverse_proxy /static/graph/* backend:8000
+    handle /graph* {
+        reverse_proxy backend:8000
+    }
+}

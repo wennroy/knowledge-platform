@@ -1,0 +1,50 @@
+# ---- Secrets / local config ----
+.env
+.env.local
+*.pem
+*.key
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ---- Node ----
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.vite/
+
+# ---- Runtime data ----
+# LanceDB index — rebuildable from the vault (see docs/RUNBOOK.md)
+backend/data/
+# Staging area for parsed-but-not-yet-committed files
+backend/.staging/
+vault/.staging/
+# Local backups
+backups/
+
+# ---- Agent / tooling memory (never commit) ----
+.leanflow/
+.remember/
+.playwright-mcp/
+.claude/
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+
+# ---- Editors ----
+.idea/
+.vscode/
+*.swp

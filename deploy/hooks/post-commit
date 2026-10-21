@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Post-commit hook for the knowledge vault.
+#
+# Triggers a full index reconcile on the FastAPI backend so that documents
+# committed by a teammate become searchable immediately.
+#
+# Install with:
+#   bash deploy/scripts/install-git-hooks.sh
+#
+# Override the backend address with KB_BACKEND_URL (default: http://backend:8000,
+# which is the docker-compose service name).
+
+set -u
+
+BACKEND_URL="${KB_BACKEND_URL:-http://backend:8000}"
+
+curl -sf -X POST "${BACKEND_URL}/admin/index/scan" \
+  -H "Content-Type: application/json" \
+  -d '{"reason":"git-commit"}' >/dev/null 2>&1 || true
+
+exit 0

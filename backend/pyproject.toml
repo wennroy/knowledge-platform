@@ -1,0 +1,64 @@
+[project]
+name = "knowledge-platform-backend"
+version = "0.1.0"
+description = "Knowledge platform backend (FastAPI + LanceDB + MarkItDown/Docling)"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "knowledge-platform" }]
+
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "httpx>=0.27.0",
+    "lancedb>=0.20.0",
+    "pyarrow>=18.0.0",
+    "markitdown[all]>=0.1.0",
+    "docling>=2.0.0",
+    "watchdog>=5.0.0",
+    "pyyaml>=6.0",
+    "tiktoken>=0.8.0",
+    "pydantic>=2.8.0",
+    "pydantic-settings>=2.5.0",
+    "python-multipart>=0.0.12",
+    "markdown-it-py>=3.0.0",
+    "numpy>=1.26.0",
+    "prometheus-client>=0.20",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.7.0",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# Explicit rule set so linting is reproducible across ruff versions.
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    # FastAPI's Depends()/File() in defaults is the idiomatic pattern.
+    "B008",
+    # Line length is handled by the formatter, not the linter.
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may import optional/optional-at-runtime helpers inside functions.
+"tests/*" = ["B008"]
