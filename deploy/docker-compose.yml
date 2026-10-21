@@ -4,7 +4,12 @@ services:
       context: ..
       dockerfile: deploy/backend.Dockerfile
     restart: unless-stopped
-    env_file: ../backend/.env
+    # `required: false` so `docker compose config` works in CI / fresh
+    # checkouts where backend/.env has not been created yet. Real deployments
+    # should create backend/.env from backend/.env.example.
+    env_file:
+      - path: ../backend/.env
+        required: false
     # Override paths to match the volume mounts below (relative paths in .env
     # resolve to /Users/b/backend/... inside the container, which is ephemeral).
     environment:

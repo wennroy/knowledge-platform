@@ -31,6 +31,10 @@ from app.services import parser_router as parser_router_module
 from app.services.indexer import LanceIndexer
 from app.services.retriever import RetrievalResult, Retriever
 
+# Repo root: backend/tests/ -> backend/ -> <repo>. Resolved from this file so
+# the suite behaves identically on a developer machine and in CI.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 # ====================================================================== fixtures
 
 
@@ -1056,8 +1060,13 @@ class TestGErrorsAndEdges:
 
 class TestHConcurrencyGit:
     def test_h1_post_commit_hook_references_scan_endpoint(self):
-        """H1: vault post-commit hook exists, is executable, and references /admin/index/scan."""
-        hook = Path("/Users/wennroy/proj/knowledge-platform/vault/.git/hooks/post-commit")
+        """H1: the post-commit hook template is executable and calls /admin/index/scan.
+
+        The hook ships as a template under deploy/hooks/ because a live
+        .git/hooks/ directory is never tracked by git. It is installed into
+        the vault repo by deploy/scripts/install-git-hooks.sh.
+        """
+        hook = REPO_ROOT / "deploy" / "hooks" / "post-commit"
         assert hook.exists(), "post-commit hook missing"
         # Must be executable
         assert os.access(hook, os.X_OK), "post-commit hook is not executable"
@@ -1193,7 +1202,7 @@ class TestHConcurrencyGit:
 class TestIDeployment:
     @pytest.fixture
     def compose_file(self) -> Path:
-        return Path("/Users/wennroy/proj/knowledge-platform/deploy/docker-compose.yml")
+        return REPO_ROOT / "deploy" / "docker-compose.yml"
 
     def test_i1_docker_compose_config_quiet(self, compose_file: Path):
         """I1: docker compose config -q exits 0."""
@@ -1222,13 +1231,13 @@ class TestIDeployment:
 
     def test_i3_backup_script_syntax(self):
         """I3: backup.sh passes ``bash -n``."""
-        script = Path("/Users/wennroy/proj/knowledge-platform/deploy/scripts/backup.sh")
+        script = REPO_ROOT / "deploy" / "scripts" / "backup.sh"
         res = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
         assert res.returncode == 0, res.stderr
 
     def test_i4_restore_script_syntax_and_missing_arg(self):
         """I4: restore.sh passes ``bash -n``; missing arg -> non-zero exit."""
-        script = Path("/Users/wennroy/proj/knowledge-platform/deploy/scripts/restore.sh")
+        script = REPO_ROOT / "deploy" / "scripts" / "restore.sh"
         # syntax
         res = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
         assert res.returncode == 0, res.stderr
