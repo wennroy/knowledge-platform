@@ -3,21 +3,26 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 
-from app.config import settings
+from app.config import get_settings, settings
 from app.deps import get_logger
 from app.models import UploadResponse
 from app.services.indexer import LanceIndexer
 from app.services.parser_router import ParserError, parse
-from app.services.vault import save_staging, write_failed, write_md
+from app.services.vault import read_md, save_staging, write_failed, write_md
 
 log = get_logger("routes.files")
 
 router = APIRouter(prefix="/v1/files", tags=["files"])
+
+# The document tree lives at ``/v1/tree`` (not under ``/v1/files``), so it gets
+# its own router with a different prefix.
+tree_router = APIRouter(prefix="/v1", tags=["files"])
 
 
 def _indexer() -> LanceIndexer:
@@ -36,6 +41,45 @@ def _route_for(suffix: str) -> str:
     if s == ".md":
         return "notes/personal"
     return "team"
+
+
+# ------------------------------------------------------------------ vault helpers
+def _vault_base() -> Path:
+    """Resolved vault root.
+
+    Uses ``get_settings()`` rather than the module-level ``settings``
+    singleton so the vault location always reflects the current
+    environment (the singleton is bound at import time).
+    """
+    return get_settings().vault_path()
+
+
+def _safe_target(base: Path, relative_path: str) -> Path:
+    """Resolve ``relative_path`` inside the vault, rejecting traversal.
+
+    Same guard as the delete endpoint: resolve first, then check the result is
+    still inside the vault root.
+    """
+    target = (base / relative_path).resolve()
+    if not str(target).startswith(str(base)):
+        raise HTTPException(status_code=400, detail="path escapes vault")
+    return target
+
+
+def _coerce_tags(value: Any) -> list[str]:
+    """Best-effort coercion of a frontmatter ``tags`` field to list[str]."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(t) for t in value if isinstance(t, (str, int, float))]
+    if isinstance(value, str):
+        return [t.strip() for t in value.split(",") if t.strip()]
+    return []
+
+
+def _iso_mtime(path: Path) -> str:
+    """ISO-8601 timestamp of the file's mtime."""
+    return datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
 
 
 @router.post("", response_model=UploadResponse)
@@ -162,3 +206,92 @@ async def delete_file(file_path: str, indexer: LanceIndexer = Depends(_indexer))
     target.unlink()
     indexer.delete_file(target)
     return {"deleted": file_path}
+
+
+@router.get("/{file_path:path}")
+async def read_file(file_path: str) -> dict:
+    """Read one markdown document (body + frontmatter + stat info).
+
+    ``file_path`` is relative to the vault root. Path traversal is rejected
+    with the same resolve-and-compare guard the delete endpoint uses.
+    """
+    base = _vault_base()
+    target = _safe_target(base, file_path)
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    fm = read_md(file_path, vault_path=base)
+    stat = target.stat()
+    return {
+        "file_path": file_path,
+        "content": fm.body,
+        "frontmatter": fm.meta or {},
+        "size_bytes": stat.st_size,
+        "updated_at": _iso_mtime(target),
+    }
+
+
+# ------------------------------------------------------------------ doc tree
+def _build_tree(base: Path) -> list[dict[str, Any]]:
+    """Build the nested document tree for the vault.
+
+    Directories come before files; each group is sorted by name. Only
+    markdown files are listed, and only directories that contain at least one
+    markdown file are kept.
+    """
+    if not base.exists():
+        return []
+
+    def walk(directory: Path, prefix: str) -> list[dict[str, Any]]:
+        try:
+            entries = sorted(directory.iterdir(), key=lambda p: p.name)
+        except (OSError, PermissionError):
+            return []
+
+        dirs: list[dict[str, Any]] = []
+        files: list[dict[str, Any]] = []
+
+        for entry in entries:
+            if entry.name.startswith("."):
+                # skip .staging, .git, .obsidian, ...
+                continue
+            rel = f"{prefix}{entry.name}"
+            if entry.is_dir():
+                children = walk(entry, f"{rel}/")
+                if children:
+                    dirs.append(
+                        {
+                            "name": entry.name,
+                            "type": "dir",
+                            "path": rel,
+                            "children": children,
+                        }
+                    )
+            elif entry.is_file() and entry.suffix.lower() == ".md":
+                fm = read_md(rel, vault_path=base)
+                stat = entry.stat()
+                files.append(
+                    {
+                        "name": entry.name,
+                        "type": "file",
+                        "path": rel,
+                        "tags": _coerce_tags((fm.meta or {}).get("tags")),
+                        "size_bytes": stat.st_size,
+                        "updated_at": _iso_mtime(entry),
+                    }
+                )
+
+        # Directories first, then files; each group already name-sorted.
+        return dirs + files
+
+    return walk(base, "")
+
+
+@tree_router.get("/tree")
+async def get_tree() -> dict:
+    """Return the vault as a nested document tree.
+
+    Each file node carries ``tags`` (from its frontmatter), ``size_bytes`` and
+    ``updated_at``; directories carry their children.
+    """
+    base = _vault_base()
+    return {"tree": _build_tree(base)}

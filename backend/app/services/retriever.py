@@ -46,6 +46,10 @@ class RetrievalResult:
     text: str = ""
     score: float = 0.0
     chunk_id: str = ""
+    # Character offsets of the chunk inside the source markdown. Used by the
+    # frontend to highlight the cited passage inside the rendered document.
+    start_offset: int = 0
+    end_offset: int = 0
 
     def heading_str(self) -> str:
         return " > ".join(self.heading_path) if self.heading_path else ""
@@ -139,6 +143,8 @@ class Retriever:
             text=str(row.get("text", "")),
             score=Retriever._distance_to_score(distance),
             chunk_id=str(row.get("id", "")),
+            start_offset=int(row.get("start_offset", 0) or 0),
+            end_offset=int(row.get("end_offset", 0) or 0),
         )
 
     def retrieve(self, query: str, top_k: int = 8) -> list[RetrievalResult]:
@@ -193,13 +199,21 @@ class Retriever:
 
     @staticmethod
     def references_payload(results: Sequence[RetrievalResult]) -> list[dict[str, Any]]:
-        """Project hits into the structure Open WebUI's references event expects."""
+        """Project hits into the structure Open WebUI's references event expects.
+
+        The frontend additionally needs ``start_offset`` / ``end_offset`` (to
+        locate the cited passage in the rendered document) and ``text`` (to
+        show the quoted snippet without re-reading the file).
+        """
         return [
             {
                 "file_path": r.file_path,
                 "heading": r.heading_str(),
                 "chunk_id": r.chunk_id,
                 "score": round(float(r.score), 4),
+                "start_offset": r.start_offset,
+                "end_offset": r.end_offset,
+                "text": r.text,
             }
             for r in results
         ]

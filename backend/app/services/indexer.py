@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -314,10 +315,23 @@ class LanceIndexer:
 
 
 def _maybe_await(value):
-    """Await if value is awaitable; otherwise return as-is."""
-    if asyncio.iscoroutine(value):
+    """Await if value is awaitable; otherwise return as-is.
+
+    ``asyncio.run`` cannot be called while an event loop is running in the
+    current thread, which happens whenever this sync function is invoked
+    directly from async context (e.g. a FastAPI lifespan hook). Rather than
+    raising, run the coroutine on a dedicated thread with its own loop.
+    """
+    if not asyncio.iscoroutine(value):
+        return value
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No loop in this thread — the normal case.
         return asyncio.run(value)
-    return value
+    # A loop is running here: hand the coroutine to a fresh thread.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, value).result()
 
 
 def _json_dumps(value: Any) -> str:

@@ -205,5 +205,10 @@ def test_references_payload_round_trip():
             "heading": "Alpha",
             "chunk_id": "c-1",
             "score": 0.8329,
+            # F1: the frontend needs the offsets + the quoted text to locate
+            # the cited passage inside the rendered document.
+            "start_offset": 0,
+            "end_offset": 0,
+            "text": "x",
         }
     ]
