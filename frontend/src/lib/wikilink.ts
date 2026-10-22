@@ -28,10 +28,10 @@ export const KB_SCHEME = 'kb://'
 const WIKILINK_RE = /\[\[([^\]\n]+?)\]\]/g
 
 /** Matches the opening (or closing) fence of a code block. */
-const FENCE_RE = /^\s{0,3}(`{3,}|~{3,})/
+const FENCE_RE = /^(?:`{3,}|~{3,})/
 
-/** Matches the start of a list item. */
-const LIST_RE = /^\s*(?:[-*+]|\d+[.)])\s/
+/** Matches the start of a list item, capturing indentation, marker and gap. */
+const LIST_RE = /^(\s*)([-*+]|\d+[.)])(\s+)\S/
 
 /** Parse every wikilink of a text. */
 export function parseWikilinks(text: string): Wikilink[] {
@@ -137,34 +137,87 @@ function transformLine(line: string): string {
 }
 
 /**
+ * The column width of a line's leading whitespace.
+ *
+ * A tab advances to the next multiple of four, which is what CommonMark
+ * assumes.
+ */
+function indentWidth(line: string): number {
+  let width = 0
+  for (const ch of line) {
+    if (ch === ' ') {
+      width += 1
+    } else if (ch === '\t') {
+      width += 4 - (width % 4)
+    } else {
+      break
+    }
+  }
+  return width
+}
+
+/**
+ * The content column of a list item — the column its content starts at.
+ *
+ * `- item` puts its content at column 2; `1. item` at column 3. Blocks
+ * inside the item are measured relative to that column, which is what
+ * CommonMark does.
+ */
+function listContentIndent(line: string): number | null {
+  const match = LIST_RE.exec(line)
+  if (!match) {
+    return null
+  }
+  return match[1].length + match[2].length + match[3].length
+}
+
+/**
  * Rewrite every wikilink of a markdown document into a `kb://` link.
  *
  * Fenced code blocks, indented code blocks and inline code spans are left
  * untouched — a wikilink inside code is a literal string, not a link.
+ *
+ * Indentation is measured *relative to the enclosing list item's content
+ * column*, so both a list item's own code block (6+ spaces) and a fence
+ * nested inside a list item (indented to the item's content column) are
+ * recognised correctly.
  */
 export function preprocessWikilinks(markdown: string): string {
   const lines = markdown.split('\n')
   const out: string[] = []
   let inFence = false
-  let previousMeaningful = ''
+  // Content column of the list item we are currently inside; 0 = top level.
+  let listIndent = 0
+
   for (const line of lines) {
-    if (FENCE_RE.test(line)) {
+    // The leading whitespace, counted in characters (for slicing) and in
+    // columns (for the code-block rules — a tab is worth four columns).
+    const charIndent = /^[ \t]*/.exec(line)?.[0].length ?? 0
+    const columns = indentWidth(line)
+    const content = line.slice(charIndent)
+
+    // Track the enclosing list item.
+    const itemIndent = listContentIndent(line)
+    if (itemIndent !== null) {
+      listIndent = itemIndent
+    } else if (line.trim() && columns < listIndent) {
+      // Dedented back out of the list item.
+      listIndent = 0
+    }
+
+    const effectiveIndent = Math.max(0, columns - listIndent)
+
+    // A fence may be indented by up to 3 columns relative to its context.
+    const isFence = effectiveIndent <= 3 && FENCE_RE.test(content)
+    if (isFence) {
       inFence = !inFence
       out.push(line)
-      if (line.trim()) {
-        previousMeaningful = line
-      }
       continue
     }
-    // An indented block is code — unless it continues a list item.
-    const indentedCode =
-      !inFence &&
-      /^(?: {4,}|\t)/.test(line) &&
-      !LIST_RE.test(previousMeaningful)
-    out.push(inFence || indentedCode ? line : transformLine(line))
-    if (line.trim()) {
-      previousMeaningful = line
-    }
+
+    // Four columns of relative indentation make a code block.
+    const isIndentedCode = !inFence && effectiveIndent >= 4
+    out.push(inFence || isIndentedCode ? line : transformLine(line))
   }
   return out.join('\n')
 }
