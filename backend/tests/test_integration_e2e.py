@@ -248,7 +248,9 @@ class TestAUploadAndParse:
         assert body["status"] == "ok"
         assert body["parser"] == "markitdown"
         assert body["chunks"] >= 1
-        md_path = Path(body["file_path"])
+        # ``file_path`` is relative to the vault root.
+        assert not Path(body["file_path"]).is_absolute()
+        md_path = tmp_path / "vault" / body["file_path"]
         assert md_path.exists()
         text = md_path.read_text(encoding="utf-8")
         # Frontmatter complete
@@ -263,7 +265,7 @@ class TestAUploadAndParse:
         assert any(s.file_path == body["file_path"] for s in statuses)
 
     def test_a2_scanned_pdf_docling_fallback(
-        self, raw_client: TestClient, stub_parser
+        self, raw_client: TestClient, stub_parser, tmp_path: Path
     ):
         """A2: scanned -> docling fallback path (parser=='docling', ocr_used==True)."""
         stub_parser(
@@ -279,7 +281,8 @@ class TestAUploadAndParse:
         body = response.json()
         assert body["parser"] == "docling"
         assert body["status"] == "ok"
-        md_path = Path(body["file_path"])
+        # ``file_path`` is relative to the vault root.
+        md_path = tmp_path / "vault" / body["file_path"]
         fm_text = md_path.read_text(encoding="utf-8")
         assert "parser: docling" in fm_text
         assert "ocr_used: true" in fm_text
@@ -309,13 +312,12 @@ class TestAUploadAndParse:
 
     def test_a4_oversize_file_rejected_with_413(self, raw_client: TestClient, monkeypatch):
         """A4: oversize -> 413."""
-        # Mutate settings.MAX_UPLOAD_BYTES directly on the captured instances.
-        import app.routes.files as files_module
-        from app.config import settings as cfg_settings
+        # Mutate the limit on the settings instance the route actually reads.
+        from app.config import get_settings
 
-        original = cfg_settings.MAX_UPLOAD_BYTES
-        cfg_settings.MAX_UPLOAD_BYTES = 1024
-        monkeypatch.setattr(files_module.settings, "MAX_UPLOAD_BYTES", 1024)
+        current = get_settings()
+        original = current.MAX_UPLOAD_BYTES
+        monkeypatch.setattr(current, "MAX_UPLOAD_BYTES", 1024)
         try:
             data = b"x" * 2048
             response = raw_client.post(
@@ -325,7 +327,7 @@ class TestAUploadAndParse:
             assert response.status_code == 413
             assert "too large" in response.text.lower()
         finally:
-            cfg_settings.MAX_UPLOAD_BYTES = original
+            monkeypatch.setattr(current, "MAX_UPLOAD_BYTES", original)
 
     def test_a5_duplicate_upload_same_sha(self, raw_client: TestClient, stub_parser):
         """A5: duplicate (same sha256) -> expected to be skipped, not double-indexed.
@@ -1222,14 +1224,14 @@ class TestHConcurrencyGit:
         )
         assert r.status_code == 200
         rel_path = r.json()["file_path"]
+        # ``file_path`` is relative to the vault root.
+        assert not Path(rel_path).is_absolute()
         # Sanity: present
         idx = LanceIndexer()
         assert any(s.file_path == rel_path for s in idx.get_status())
 
-        # Compute the relative path inside the vault
-        vault_root = tmp_path / "vault"
-        rel = str(Path(rel_path).relative_to(vault_root))
-        d = raw_client.delete(f"/v1/files/{rel}")
+        # The delete endpoint takes the vault-relative path.
+        d = raw_client.delete(f"/v1/files/{rel_path}")
         assert d.status_code == 200
         assert not any(s.file_path == rel_path for s in LanceIndexer().get_status())
 

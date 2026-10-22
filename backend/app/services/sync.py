@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -10,7 +11,7 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from app.config import settings
+from app.config import get_settings
 from app.services.indexer import LanceIndexer
 from app.services.vault import list_vault, read_md
 
@@ -33,28 +34,45 @@ class VaultIndexer:
         self._pending: dict[str, float] = {}
         self._lock = threading.Lock()
         self._timer: threading.Timer | None = None
-        self.on_index = on_index or (lambda p: self.indexer.index_file(p, _read(p)))
+        self.on_index = on_index or (
+            lambda p: self.indexer.index_file(p, _read(p), _read_source_hash(p))
+        )
         self.on_delete = on_delete or (lambda p: self.indexer.delete_file(p))
 
     # ------------------------------------------------------------------ reconcile
     def startup_reconcile(self, vault_path: Path | None = None) -> dict:
         """Walk the vault and compare with index. Re-index any diff."""
-        base = Path(vault_path or settings.vault_path())
-        indexed = {s.file_path: s for s in self.indexer.get_status()}
+        base = Path(vault_path or get_settings().vault_path())
         results = {"scanned": 0, "indexed": 0, "deleted": 0, "errors": []}
 
-        # Files on disk
+        # Rows written before the relative-path contract hold absolute paths.
+        # They can never be matched by a relative-path lookup, so drop them
+        # first; the files are re-indexed below with the relative path.
+        results["deleted"] += self.indexer.purge_legacy_paths()
+
+        indexed = {s.file_path: s for s in self.indexer.get_status()}
         on_disk: set[str] = set()
+
+        # Files on disk
         for md_path in list_vault(base):
             results["scanned"] += 1
-            rel = str(md_path)
+            # Same normalisation the indexer applies, so both sides of the
+            # comparison use the identical key.
+            rel = self.indexer.rel_path(md_path)
             on_disk.add(rel)
             try:
-                fm = read_md(str(md_path.relative_to(base)), base)
+                try:
+                    rel_for_read = md_path.relative_to(base).as_posix()
+                except ValueError:
+                    rel_for_read = md_path.name
+                fm = read_md(rel_for_read, base)
                 content_hash = fm.meta.get("source_hash")
                 # Always re-read full content for safety in PoC
                 body = fm.body
-                status = self.indexer.index_file(md_path, body)
+                # Carry the upload digest (frontmatter `source_hash`) so the
+                # upload-dedup key survives a reconcile pass.
+                source_hash = str(content_hash or "")
+                status = self.indexer.index_file(md_path, body, source_hash)
                 if status.status != "ok":
                     results["errors"].append(
                         {"path": rel, "error": status.error or "unknown"}
@@ -65,7 +83,7 @@ class VaultIndexer:
                         log.info("hash drift on %s; re-indexed", rel)
             except Exception as exc:  # noqa: BLE001
                 log.exception("reconcile failed for %s", md_path)
-                results["errors"].append({"path": str(md_path), "error": str(exc)})
+                results["errors"].append({"path": rel, "error": str(exc)})
 
         # Files in index but missing from disk
         for path in list(indexed.keys()):
@@ -79,10 +97,21 @@ class VaultIndexer:
 
         return results
 
+    def rebuild_index(self, vault_path: Path | None = None) -> dict:
+        """Wipe the index and rebuild it from the vault.
+
+        Used by ``POST /admin/index/rebuild``. Clearing first is required:
+        rows written before the relative-path contract cannot be matched (and
+        therefore cannot be deleted) by a relative-path lookup, so they would
+        survive a plain re-index and show up as duplicates.
+        """
+        self.indexer.clear_all()
+        return self.startup_reconcile(vault_path)
+
     # ------------------------------------------------------------------ watchdog
     def start_watchdog(self, vault_path: Path | None = None) -> Observer:
         """Start the watchdog observer with 500ms debouncing."""
-        base = Path(vault_path or settings.vault_path())
+        base = Path(vault_path or get_settings().vault_path())
         base.mkdir(parents=True, exist_ok=True)
         handler = _Handler(self)
         self._observer = Observer()
@@ -161,3 +190,18 @@ def _read(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return ""
+
+
+def _read_source_hash(path: Path) -> str:
+    """The sha256 of the original upload, taken from the frontmatter.
+
+    Watchdog-triggered indexing must keep the upload-dedup key intact,
+    otherwise a file that was indexed by the watcher could not be detected
+    as a duplicate on a later upload.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return ""
+    match = re.search(r"^source_hash:\s*(\S+)\s*$", text, re.MULTILINE)
+    return match.group(1) if match else ""

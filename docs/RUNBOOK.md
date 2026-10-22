@@ -3,17 +3,28 @@
 Operational guide for deploying, verifying, upgrading, backing up, restoring,
 and troubleshooting the Knowledge Platform stack.
 
-The stack has two long-running services:
+The stack has three long-running services:
 
 | Service    | Image / build                  | Loopback port |
 |------------|--------------------------------|---------------|
 | `backend`  | built from `deploy/backend.Dockerfile` | `127.0.0.1:8000` |
+| `caddy`    | `caddy:2-alpine`               | `80` / `443` |
 | `open-webui` | `ghcr.io/open-webui/open-webui:main` | `127.0.0.1:3000` |
+
+Entry points:
+
+| URL | What |
+|-----|------|
+| `https://<host>/app/` | **the unified frontend — the primary entry point** (document tree + reader + AI chat) |
+| `https://<host>/app/graph` | the knowledge graph (force-directed canvas) |
+| `https://<host>/open-webui/` | Open WebUI — optional fallback (multi-provider / agent scenarios) |
+| `http://127.0.0.1:3000` | Open WebUI, direct port |
 
 Data volumes:
 
 - `lancedb` — named volume, holds the vector index (rebuilt on startup if missing)
 - `open-webui` — named volume, holds chat history / users
+- `caddy_data` / `caddy_config` — named volumes, hold the TLS certificates
 - `../vault` — bind-mounted read-write, the git-tracked notes source of truth
 
 ---
@@ -45,6 +56,52 @@ The gateway endpoint is the only LLM/embedding-facing address — the backend
 treats it as an OpenAI-compatible service. `OPENAI_API_BASE_URL` inside the
 `open-webui` container points at `http://backend:8000/v1`.
 
+### 1.1 The frontend is built inside the image
+
+`deploy/backend.Dockerfile` has three stages:
+
+1. `frontend` — `node:22-slim`, runs `npm ci && npm run build` in `frontend/`.
+   Vite writes the bundle to `backend/app/static/app` (see
+   `frontend/vite.config.ts`).
+2. `builder` — installs the Python dependencies into an isolated prefix.
+3. `final` — copies the dependency prefix, the backend source and the
+   freshly built SPA into the runtime image.
+
+FastAPI serves the SPA under `/app/` (with a history fallback for
+`/app/graph` and `/app/doc/*`). **A plain `docker compose up -d --build`
+therefore yields a complete application** — no local `npm run build` needed.
+
+> If you deploy with an **old image** that was built before the frontend
+> stage existed, `/app/` returns 404. Rebuild once:
+> `docker compose up -d --build backend`.
+
+### 1.2 Frontend development (local)
+
+```bash
+cd /Users/wennroy/proj/knowledge-platform/frontend
+npm ci
+npm run dev          # http://localhost:5173/app/
+```
+
+The dev server proxies `/v1`, `/graph`, `/healthz` and `/admin` to the
+backend on `localhost:8000`, so start the backend first:
+
+```bash
+cd /Users/wennroy/proj/knowledge-platform/backend
+.venv/bin/uvicorn app.main:app --port 8000
+```
+
+Production build (writes to `backend/app/static/app`, which FastAPI serves
+directly — restart the backend afterwards to pick it up):
+
+```bash
+cd /Users/wennroy/proj/knowledge-platform/frontend
+npm run build       # tsc --noEmit && vite build
+```
+
+`npm run build` must stay green: `tsc --noEmit` runs first and fails the
+build on any type error.
+
 ---
 
 ## 2. Verify
@@ -58,7 +115,14 @@ curl -sf http://127.0.0.1:8000/healthz   # -> {"ok": true}
 # 2. metrics endpoint (Prometheus text format)
 curl -sf http://127.0.0.1:8000/metrics | head
 
-# 3. Open WebUI
+# 3. the unified frontend (SPA, served by the backend)
+curl -sf http://127.0.0.1:8000/app/ | head -c 200   # -> <!doctype html>...
+
+# 4. the knowledge graph — SPA route
+#    http://127.0.0.1:8000/app/graph
+#    the graph API: curl -sf http://127.0.0.1:8000/graph | head -c 200
+
+# 5. Open WebUI (optional fallback)
 # Open http://127.0.0.1:3000 in a browser.
 # Log in, then pick any model from the dropdown — chat completions
 # are routed via the OpenAI-compat layer to the backend.
@@ -66,6 +130,10 @@ curl -sf http://127.0.0.1:8000/metrics | head
 
 If the chat UI shows "no models available", check the backend logs and the
 `GATEWAY_BASE_URL` env var — see §6.
+
+The knowledge graph lives at **`/app/graph`** — a route of the unified
+frontend, not a separate site. The old standalone `graph-viewer/` SPA and
+`backend/app/static/graph/` are superseded and can be removed.
 
 ---
 
@@ -83,6 +151,65 @@ docker compose up -d --build   # rebuild backend if sources changed,
 Vault data on the host (`/Users/wennroy/proj/knowledge-platform/vault`) and
 the named volumes are preserved across upgrades — they are never deleted by
 `compose up`.
+
+### 3.1 Upgrade the frontend
+
+The SPA is baked into the backend image, so a frontend change needs an
+image rebuild:
+
+```bash
+cd /Users/wennroy/proj/knowledge-platform/deploy
+docker compose up -d --build backend   # re-runs the node build stage
+docker compose restart backend         # pick up the new bundle
+```
+
+Only the `frontend` stage is re-executed when `frontend/` changed; the
+`npm ci` layer is cached as long as `package-lock.json` is unchanged.
+
+During local development you can skip the image entirely: `npm run build`
+in `frontend/` writes straight into `backend/app/static/app`, and the
+locally running uvicorn serves it — see §1.2.
+
+### 3.2 One-off migration: absolute → relative `file_path`
+
+Index rows used to store the **absolute** path of every document
+(`/Users/.../vault/team/api-design.md`). That leaked the server layout and
+invalidated every index entry as soon as the vault moved to another host or
+container mount point. The backend now stores a **vault-relative** POSIX
+path (`team/api-design.md`) everywhere — in the index, in `/admin/index/status`,
+in `/v1/files` and in the chat `references` event.
+
+Rows written by an older backend cannot be matched by a relative-path lookup,
+so they are deleted instead of being re-indexed next to the new rows. The
+backend does this automatically on startup (during the reconcile pass) for
+files that are still in the vault, but a **full rebuild** is the recommended
+one-off step after the upgrade:
+
+```bash
+# 1. rebuild the index from scratch (idempotent, safe to repeat)
+curl -X POST http://127.0.0.1:8000/admin/index/rebuild
+
+# 2. verify that every path is relative
+curl -s http://127.0.0.1:8000/admin/index/status \
+  | python3 -c "import json,sys; [print(i['file_path']) for i in json.load(sys.stdin)['items']]"
+```
+
+Expected output — no leading `/`, no `..`:
+
+```
+team/api-design.md
+notes/personal/2026-01-01_note.md
+```
+
+Inside the compose deployment use the container-local address instead:
+
+```bash
+docker compose exec backend \
+  curl -s -X POST http://127.0.0.1:8000/admin/index/rebuild
+```
+
+The rebuild only touches the derived index — the vault itself is never
+modified.
 
 ---
 

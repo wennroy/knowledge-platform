@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import type { ChatMessage, Citation } from '../api/types'
-import { CitationMarker } from './CitationMarker'
+import { Message } from './Message'
 import { SourcesDrawer } from './SourcesDrawer'
 
 export interface ChatPanelProps {
@@ -11,27 +11,50 @@ export interface ChatPanelProps {
   onSend: (text: string) => void
   /** True while an answer is streaming in. */
   isStreaming: boolean
-  /** Called when an inline citation marker is clicked. */
+  /** Called when the user stops the running answer. */
+  onStop: () => void
+  /** Called when a citation marker is clicked. */
   onCitationJump?: (citation: Citation) => void
+  /** Error of a message, keyed by message id. */
+  messageErrors?: Record<string, string>
 }
 
 /**
  * Right-hand column: the AI question-and-answer panel.
  *
- * F1 renders static messages; the SSE wiring lands in F3.
+ * The answer streams in through `onSend` / `isStreaming`; the citation markers
+ * of the last answer are also listed in the sources drawer.
  */
 export function ChatPanel({
   messages,
   onSend,
   isStreaming,
+  onStop,
   onCitationJump,
+  messageErrors,
 }: ChatPanelProps) {
   const [draft, setDraft] = useState('')
   const [sourcesOpen, setSourcesOpen] = useState(false)
+  const scrollRef = useRef<HTMLDivElement>(null)
 
-  const citations = messages
-    .flatMap((message) => message.citations ?? [])
-    .slice(-8)
+  /** The citations of the most recent answer. */
+  const citations = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]
+      if (message.role === 'assistant' && message.citations?.length) {
+        return message.citations
+      }
+    }
+    return []
+  }, [messages])
+
+  // Follow the stream: keep the newest content in view.
+  useEffect(() => {
+    const element = scrollRef.current
+    if (element) {
+      element.scrollTop = element.scrollHeight
+    }
+  }, [messages])
 
   const submit = () => {
     const text = draft.trim()
@@ -55,32 +78,17 @@ export function ChatPanel({
         </button>
       </div>
 
-      <div className="chat-messages">
+      <div className="chat-messages" ref={scrollRef}>
         {messages.length === 0 ? (
           <p className="empty-hint">问点什么吧，答案会带上文档引用。</p>
         ) : (
           messages.map((message) => (
-            <div className={`chat-message chat-${message.role}`} key={message.id}>
-              <div className="chat-role">
-                {message.role === 'user' ? '我' : '助手'}
-              </div>
-              <div className="chat-content">
-                {message.content}
-                {message.streaming ? <span className="caret" /> : null}
-              </div>
-              {message.citations && message.citations.length > 0 ? (
-                <div className="chat-citations">
-                  {message.citations.map((citation, index) => (
-                    <CitationMarker
-                      key={`${message.id}-${citation.chunk_id}-${index}`}
-                      citation={citation}
-                      index={index + 1}
-                      onClick={(target) => onCitationJump?.(target)}
-                    />
-                  ))}
-                </div>
-              ) : null}
-            </div>
+            <Message
+              key={message.id}
+              message={message}
+              onCitationJump={(citation) => onCitationJump?.(citation)}
+              error={messageErrors?.[message.id]}
+            />
           ))
         )}
       </div>
@@ -89,6 +97,10 @@ export function ChatPanel({
         citations={citations}
         open={sourcesOpen}
         onClose={() => setSourcesOpen(false)}
+        onSelect={(citation) => {
+          setSourcesOpen(false)
+          onCitationJump?.(citation)
+        }}
       />
 
       <form
@@ -103,6 +115,7 @@ export function ChatPanel({
           value={draft}
           placeholder="对知识库提问…"
           rows={2}
+          disabled={isStreaming}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) {
@@ -111,9 +124,15 @@ export function ChatPanel({
             }
           }}
         />
-        <button type="submit" className="btn btn-primary" disabled={isStreaming}>
-          {isStreaming ? '回答中…' : '发送'}
-        </button>
+        {isStreaming ? (
+          <button type="button" className="btn btn-danger" onClick={onStop}>
+            停止
+          </button>
+        ) : (
+          <button type="submit" className="btn btn-primary" disabled={!draft.trim()}>
+            发送
+          </button>
+        )}
       </form>
     </div>
   )

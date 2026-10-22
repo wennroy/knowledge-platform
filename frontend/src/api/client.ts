@@ -88,7 +88,18 @@ export async function uploadFile(
         }
         return
       }
-      reject(new Error(`upload failed with status ${xhr.status}`))
+      // Surface the backend's `detail` (e.g. "extension not allowed: .exe")
+      // instead of a bare status line — the reason is what the user needs.
+      let detail = `upload failed with status ${xhr.status}`
+      try {
+        const body = JSON.parse(xhr.responseText) as { detail?: unknown }
+        if (typeof body?.detail === 'string' && body.detail) {
+          detail = body.detail
+        }
+      } catch {
+        // Non-JSON error body — keep the status line.
+      }
+      reject(new Error(detail))
     }
     xhr.onerror = () => reject(new Error('upload failed'))
     xhr.onabort = () => reject(new Error('upload aborted'))

@@ -75,10 +75,17 @@ def save_staging(
 
     Returns the path on disk. Writes a sidecar ``<hash>.meta.json`` with the
     original filename so we can recover it later.
+
+    The staged file keeps the original extension: converters such as
+    MarkItDown sniff the type from it, and a bare ``<digest>`` file is
+    rejected with "File format not allowed". Callers that need the digest
+    should read ``path.stem`` (the digest is pure hex, so it never contains
+    a dot).
     """
     digest = hashlib.sha256(data).hexdigest()
     target_dir = staging_dir(vault_path)
-    target = target_dir / digest
+    suffix = Path(filename).suffix.lower()
+    target = target_dir / f"{digest}{suffix}"
     target.write_bytes(data)
     sidecar = {
         "filename": filename,

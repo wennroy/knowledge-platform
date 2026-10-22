@@ -1,0 +1,44 @@
+# Keep the Docker build context small and free of local state.
+#
+# Everything the image needs is copied explicitly by
+# `deploy/backend.Dockerfile`; anything listed here is either rebuilt
+# inside the image or mounted at runtime.
+
+# ---- Node ----
+**/node_modules
+**/.vite
+**/npm-debug.log*
+
+# ---- Python ----
+**/.venv
+**/venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/*.egg-info
+**/.mypy_cache
+
+# ---- Local runtime data (mounted, not baked in) ----
+backend/data
+backend/.staging
+backend/vault
+vault
+
+# The SPA build output. It is *rebuilt* by the `frontend` stage of the
+# Dockerfile, so keeping it out of the context keeps the Python layer
+# cached across frontend-only changes.
+backend/app/static/app
+
+# ---- Secrets (injected via env_file at runtime) ----
+**/.env
+
+# ---- Tooling / VCS ----
+.git
+.gitignore
+.playwright-mcp
+.remember
+.leanflow
+**/.leanflow
+**/.claude
+**/.DS_Store

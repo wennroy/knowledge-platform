@@ -43,6 +43,9 @@ class LanceIndexer:
         s = get_settings()
         self.lancedb_path = Path(lancedb_path or s.lancedb_path())
         self.lancedb_path.mkdir(parents=True, exist_ok=True)
+        # Vault root used to normalise every stored/returned ``file_path`` into
+        # a vault-relative POSIX path (see :meth:`_rel_path`).
+        self._vault_root = s.vault_path()
         self._db = lancedb.connect(str(self.lancedb_path))
         # Table creation is itself a write transaction, so it must not overlap
         # with another thread's add/delete.
@@ -94,6 +97,10 @@ class LanceIndexer:
             [
                 pa.field("file_path", pa.string()),
                 pa.field("file_hash", pa.string()),
+                # sha256 of the *original uploaded bytes*, distinct from
+                # ``file_hash`` (sha256 of the parsed markdown). The upload
+                # endpoint compares this to detect duplicate uploads.
+                pa.field("source_hash", pa.string()),
                 pa.field("chunk_count", pa.int64()),
                 pa.field("status", pa.string()),
                 pa.field("updated_at", pa.string()),
@@ -107,21 +114,126 @@ class LanceIndexer:
         # initialize the same LanceDB directory concurrently (H2 fix).
         for _attempt in range(3):
             try:
-                return self._db.open_table(name)
+                table = self._db.open_table(name)
             except (KeyError, FileNotFoundError, ValueError, OSError):
                 pass
+            else:
+                self._migrate_schema(table, schema)
+                return table
             try:
                 return self._db.create_table(name, schema=schema, mode="create")
             except (ValueError, OSError):
                 # Another worker just created it; loop and open.
                 continue
         # Final fallback: open must succeed now.
-        return self._db.open_table(name)
+        table = self._db.open_table(name)
+        self._migrate_schema(table, schema)
+        return table
+
+    @staticmethod
+    def _migrate_schema(table, schema: pa.Schema) -> None:
+        """Add columns that a table created by an older version lacks.
+
+        ``add_columns`` initialises new columns with null values, so old rows
+        simply have no ``source_hash`` until they are re-indexed.
+        """
+        try:
+            existing = set(table.schema.names)
+        except Exception:  # noqa: BLE001
+            return
+        missing = [f for f in schema if f.name not in existing]
+        if not missing:
+            return
+        try:
+            table.add_columns(missing)
+        except Exception:  # noqa: BLE001
+            log.warning("could not add columns %s to table", [f.name for f in missing])
 
     # ------------------------------------------------------------------ helpers
     @staticmethod
     def hash_text(text: str) -> str:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def _rel_path(self, file_path: Path | str) -> str:
+        """Vault-relative POSIX path; falls back to the raw string.
+
+        Every ``file_path`` stored in LanceDB (and every ``file_path`` handed
+        out by the API) is normalised through this helper, so the contract is
+        independent of where the vault happens to live on disk. Storing an
+        absolute path would leak the server layout and would break every
+        existing index entry as soon as the vault is moved (different host,
+        different container mount point, ...).
+        """
+        if not str(file_path):
+            return ""
+        p = Path(file_path)
+        if not p.is_absolute():
+            # Already relative — normalise separators only.
+            return p.as_posix()
+        try:
+            return p.resolve().relative_to(self._vault_root).as_posix()
+        except ValueError:
+            # Outside the vault: keep the raw value rather than losing it.
+            return p.as_posix()
+
+    #: Public alias — other modules need the same normalisation.
+    rel_path = _rel_path
+
+    def _is_legacy_path(self, stored: str) -> bool:
+        """True when ``stored`` looks like a pre-migration absolute vault path."""
+        if not stored.startswith("/"):
+            return False
+        try:
+            resolved = Path(stored).resolve()
+        except Exception:  # noqa: BLE001
+            resolved = Path(stored)
+        try:
+            resolved.relative_to(self._vault_root)
+        except ValueError:
+            return False
+        return True
+
+    def purge_legacy_paths(self) -> int:
+        """Delete rows still keyed by an absolute vault path.
+
+        Rows written before the relative-path contract carry the absolute
+        path of the file they were built from. They can never be deleted by a
+        relative-path lookup, so they are removed explicitly (together with
+        their chunk rows) and the file is re-indexed with a relative path.
+
+        Returns the number of status rows that were purged.
+        """
+        purged = 0
+        for row in self._safe_status_rows():
+            stored = str(row.get("file_path", "") or "")
+            if not self._is_legacy_path(stored):
+                continue
+            try:
+                resolved = str(Path(stored).resolve())
+            except Exception:  # noqa: BLE001
+                resolved = stored
+            with _WRITE_LOCK:
+                self._refresh_tables()
+                for candidate in {stored, resolved}:
+                    self._delete_by_file_path(self._chunks, candidate)
+                    self._delete_by_file_path(self._status, candidate)
+            purged += 1
+        if purged:
+            log.info("purged %d legacy absolute-path index rows", purged)
+            self._refresh_row_count()
+        return purged
+
+    def clear_all(self) -> None:
+        """Drop every row from both tables (used by the rebuild endpoint)."""
+        with _WRITE_LOCK:
+            self._refresh_tables()
+            for table in (self._chunks, self._status):
+                try:
+                    table.delete("true")
+                except Exception:  # noqa: BLE001
+                    log.exception("failed to clear index table")
+            self._refresh_tables()
+        self._refresh_row_count()
 
     @staticmethod
     def hash_file(path: Path) -> str:
@@ -148,7 +260,9 @@ class LanceIndexer:
 
     def _delete_by_hash(self, table, file_hash: str) -> int:
         try:
-            table.delete(f"file_hash = '{file_hash}'")
+            # Quote-escape: a hash may contain single quotes.
+            escaped = file_hash.replace("'", "''")
+            table.delete(f"file_hash = '{escaped}'")
             return 1
         except Exception:  # noqa: BLE001
             return 0
@@ -179,18 +293,30 @@ class LanceIndexer:
         self._refresh_row_count()
 
     # ------------------------------------------------------------------ public
-    def index_file(self, file_path: Path, markdown: str) -> IndexStatus:
-        """Chunk + embed + upsert for a single markdown file."""
+    def index_file(
+        self,
+        file_path: Path,
+        markdown: str,
+        source_hash: str = "",
+    ) -> IndexStatus:
+        """Chunk + embed + upsert for a single markdown file.
+
+        ``source_hash`` is the sha256 of the *original uploaded bytes*. It is
+        optional: when the document came from the vault (a reconcile pass)
+        it is read from the file's frontmatter instead.
+        """
         file_path = Path(file_path)
         file_hash = self.hash_text(markdown)
-        source_path = str(file_path)
+        # Store the vault-relative POSIX path, never the absolute one.
+        source_path = self._rel_path(file_path)
         try:
             chunk_dicts = split(markdown, source_path, file_hash)
             if not chunk_dicts:
-                self._upsert_status(source_path, file_hash, 0, "ok")
+                self._upsert_status(source_path, file_hash, 0, "ok", source_hash=source_hash)
                 return IndexStatus(
                     file_path=source_path,
                     file_hash=file_hash,
+                    source_hash=source_hash,
                     chunk_count=0,
                     status="ok",
                     updated_at=utcnow_iso(),
@@ -216,12 +342,15 @@ class LanceIndexer:
                 self._delete_by_file_path(self._status, source_path)
                 self._chunks.add(rows)
 
-                self._upsert_status(source_path, file_hash, len(rows), "ok")
+                self._upsert_status(
+                    source_path, file_hash, len(rows), "ok", source_hash=source_hash
+                )
             kb_index_files_total.labels(status="indexed").inc()
             self._refresh_row_count()
             return IndexStatus(
                 file_path=source_path,
                 file_hash=file_hash,
+                source_hash=source_hash,
                 chunk_count=len(rows),
                 status="ok",
                 updated_at=now,
@@ -230,13 +359,16 @@ class LanceIndexer:
             log.exception("index_file failed for %s", file_path)
             err = str(exc)
             try:
-                self._upsert_status(source_path, file_hash, 0, "failed", error=err)
+                self._upsert_status(
+                    source_path, file_hash, 0, "failed", error=err, source_hash=source_hash
+                )
             except Exception:  # pragma: no cover
                 pass
             kb_index_files_total.labels(status="failed").inc()
             return IndexStatus(
                 file_path=source_path,
                 file_hash=file_hash,
+                source_hash=source_hash,
                 chunk_count=0,
                 status="failed",
                 updated_at=utcnow_iso(),
@@ -244,7 +376,9 @@ class LanceIndexer:
             )
 
     def delete_file(self, file_path: Path | str) -> None:
-        target = str(file_path)
+        # Normalise first: callers may pass an absolute path or the relative
+        # path that is stored in the index.
+        target = self._rel_path(file_path)
         # F-04 fix: clear all rows for this file_path directly, instead of
         # picking a single hash. This avoids orphan status rows when multiple
         # hashes ever accumulated for the same path.
@@ -260,8 +394,11 @@ class LanceIndexer:
             try:
                 out.append(
                     IndexStatus(
-                        file_path=str(r.get("file_path", "")),
+                        # Normalised defensively: rows written before the
+                        # relative-path contract still hold absolute paths.
+                        file_path=self._rel_path(str(r.get("file_path", ""))),
                         file_hash=str(r.get("file_hash", "")),
+                        source_hash=str(r.get("source_hash") or ""),
                         chunk_count=int(r.get("chunk_count", 0) or 0),
                         status=str(r.get("status", "unknown")),
                         updated_at=str(r.get("updated_at", "")),
@@ -290,6 +427,7 @@ class LanceIndexer:
         chunk_count: int,
         status: str,
         error: str | None = None,
+        source_hash: str = "",
     ) -> None:
         # Drop any existing rows for this file_path, then add the new one.
         # Keyed by file_path (not file_hash): two different documents can share
@@ -305,6 +443,7 @@ class LanceIndexer:
                     {
                         "file_path": file_path,
                         "file_hash": file_hash,
+                        "source_hash": source_hash or "",
                         "chunk_count": int(chunk_count),
                         "status": status,
                         "updated_at": utcnow_iso(),

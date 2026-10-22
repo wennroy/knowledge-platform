@@ -26,12 +26,46 @@ services:
       timeout: 5s
       retries: 3
 
+  # Reverse proxy — the single entry point for the whole platform.
+  #
+  # `/app/*`  -> the unified frontend SPA (document tree + reader + chat)
+  # `/v1/*`   -> the backend API
+  # `/graph`  -> the knowledge-graph API (the SPA route is /app/graph)
+  #
+  # The frontend is served by FastAPI itself (the build output is baked into
+  # the backend image), so there is only one application to deploy.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+      open-webui:
+        condition: service_started
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # Open WebUI — OPTIONAL FALLBACK.
+  #
+  # The unified frontend (`/app/`) is the primary entry point. Open WebUI is
+  # kept because it is stronger for multi-provider / agent scenarios; it is
+  # reachable directly on http://127.0.0.1:3000 and through Caddy under
+  # `/open-webui/`. It talks to the same backend, so both UIs share the
+  # vault, the index and the chat history format.
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
     restart: unless-stopped
     environment:
       OPENAI_API_BASE_URL: http://backend:8000/v1
       OPENAI_API_KEY: any
+      # Serve Open WebUI under /open-webui/ so it does not shadow the
+      # unified frontend at the site root.
+      WEBUI_URL: /open-webui
     volumes:
       - open-webui:/app/backend/data
     ports:
@@ -43,3 +77,5 @@ services:
 volumes:
   lancedb:
   open-webui:
+  caddy_data:
+  caddy_config:

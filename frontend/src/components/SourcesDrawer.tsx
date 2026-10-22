@@ -7,12 +7,14 @@ export interface SourcesDrawerProps {
   open: boolean
   /** Called when the drawer should close. */
   onClose: () => void
+  /** Called when a source is clicked — jumps to the quoted passage. */
+  onSelect?: (citation: Citation) => void
 }
 
 /**
  * Drawer listing every source referenced by the current answer.
  */
-export function SourcesDrawer({ citations, open, onClose }: SourcesDrawerProps) {
+export function SourcesDrawer({ citations, open, onClose, onSelect }: SourcesDrawerProps) {
   if (!open) {
     return null
   }
@@ -33,7 +35,23 @@ export function SourcesDrawer({ citations, open, onClose }: SourcesDrawerProps) 
             <li className="source-item" key={`${citation.chunk_id}-${index}`}>
               <div className="source-item-head">
                 <span className="source-index">[{index + 1}]</span>
-                <span className="source-path" title={citation.file_path}>
+                <span
+                  className={`source-path${onSelect ? ' is-clickable' : ''}`}
+                  title={citation.file_path}
+                  onClick={onSelect ? () => onSelect(citation) : undefined}
+                  onKeyDown={
+                    onSelect
+                      ? (event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault()
+                            onSelect(citation)
+                          }
+                        }
+                      : undefined
+                  }
+                  role={onSelect ? 'button' : undefined}
+                  tabIndex={onSelect ? 0 : undefined}
+                >
                   {citation.file_path}
                 </span>
               </div>

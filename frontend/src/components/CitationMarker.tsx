@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 
 import type { Citation } from '../api/types'
 
@@ -11,22 +11,56 @@ export interface CitationMarkerProps {
   onClick: (citation: Citation) => void
 }
 
+/** Rough height of the hover card — used to decide where to open it. */
+const CARD_HEIGHT = 190
+
+/** Width of the hover card (see `.citation-card` in the stylesheet). */
+const CARD_WIDTH = 300
+
+/** Distance to the right edge of the chat panel. */
+const CARD_GAP = 8
+
 /**
  * Inline citation marker (`[1]`) with a hover card showing the quoted
  * passage from the source document.
  */
 export function CitationMarker({ citation, index, onClick }: CitationMarkerProps) {
   const [open, setOpen] = useState(false)
+  const [below, setBelow] = useState(false)
+  const [shift, setShift] = useState(0)
+  const markerRef = useRef<HTMLSpanElement>(null)
+
+  /**
+   * Open the card.
+   *
+   * The card opens downwards when there is not enough room above, and it is
+   * shifted to the left when it would stick out of the chat panel.
+   */
+  const show = () => {
+    const element = markerRef.current
+    if (element) {
+      const rect = element.getBoundingClientRect()
+      setBelow(rect.top < CARD_HEIGHT)
+      const container = element.closest('.chat-messages')
+      if (container instanceof HTMLElement) {
+        const bounds = container.getBoundingClientRect()
+        const maxLeft = bounds.right - CARD_WIDTH - CARD_GAP
+        setShift(rect.left > maxLeft ? rect.left - maxLeft : 0)
+      }
+    }
+    setOpen(true)
+  }
 
   return (
     <span
-      className="citation-marker"
+      ref={markerRef}
+      className={`citation-marker${below ? ' is-below' : ''}`}
       role="button"
       tabIndex={0}
       title={`${citation.file_path}${citation.heading ? ` › ${citation.heading}` : ''}`}
-      onMouseEnter={() => setOpen(true)}
+      onMouseEnter={show}
       onMouseLeave={() => setOpen(false)}
-      onFocus={() => setOpen(true)}
+      onFocus={show}
       onBlur={() => setOpen(false)}
       onClick={() => onClick(citation)}
       onKeyDown={(event) => {
@@ -38,7 +72,11 @@ export function CitationMarker({ citation, index, onClick }: CitationMarkerProps
     >
       [{index}]
       {open ? (
-        <span className="citation-card" role="tooltip">
+        <span
+          className="citation-card"
+          role="tooltip"
+          style={shift ? { transform: `translateX(-${shift}px)` } : undefined}
+        >
           <span className="citation-card-path">{citation.file_path}</span>
           {citation.heading ? (
             <span className="citation-card-heading">{citation.heading}</span>

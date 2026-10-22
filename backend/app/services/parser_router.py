@@ -12,6 +12,13 @@ log = logging.getLogger(__name__)
 # Threshold below which MarkItDown output is considered empty / scanned-image.
 SCAN_FALLBACK_CHARS = 200
 
+#: Formats whose payload is already text. A short conversion result for
+#: these is a short document, not a scanned page, so the Docling/OCR
+#: fallback must not kick in.
+TEXT_LIKE_SUFFIXES = frozenset(
+    {".md", ".markdown", ".txt", ".text", ".csv", ".tsv", ".json", ".xml", ".html", ".htm"}
+)
+
 
 class ParserError(Exception):
     """Raised when neither MarkItDown nor Docling can produce useful text."""
@@ -42,10 +49,18 @@ def parse(file_path: Path) -> ParseResult:
 
     Default path: MarkItDown. If output is too short, fallback to Docling.
     Raises ParserError if both paths fail.
+
+    The length heuristic only applies to formats that can carry images.
+    A short ``.md`` or ``.txt`` is a short *document*, not a scanned one,
+    so those are accepted as-is instead of being pushed through the slow
+    OCR path.
     """
     file_path = Path(file_path)
     if not file_path.exists():
         raise ParserError(f"file not found: {file_path}")
+
+    suffix = file_path.suffix.lower()
+    text_like = suffix in TEXT_LIKE_SUFFIXES
 
     # 1) MarkItDown default path
     try:
@@ -53,9 +68,17 @@ def parse(file_path: Path) -> ParseResult:
 
         md = MarkItDown().convert(str(file_path))
         text = _strip_markdown(getattr(md, "text_content", "") or "")
+        if text_like:
+            # Plain-text formats: a successful conversion is authoritative,
+            # however short it is.
+            if not text:
+                raise ParserError(f"markitdown produced empty output for {file_path}")
+            return ParseResult(markdown=text, parser="markitdown", ocr_used=False)
         if len(text) >= SCAN_FALLBACK_CHARS:
             return ParseResult(markdown=text, parser="markitdown", ocr_used=False)
         markitdown_text = text
+    except ParserError:
+        raise
     except Exception as exc:  # noqa: BLE001 - capture and continue
         log.warning("markitdown failed for %s: %s", file_path, exc)
         markitdown_text = ""

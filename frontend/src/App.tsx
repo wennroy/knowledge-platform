@@ -73,9 +73,7 @@ export function Layout() {
       <UploadDialog
         open={workspace.uploadOpen}
         onClose={() => workspace.setUploadOpen(false)}
-        onUploaded={() => {
-          workspace.reloadTree()
-        }}
+        onUploaded={workspace.handleUploaded}
       />
     </div>
   )
@@ -101,6 +99,8 @@ export function DocumentRoute() {
           error={workspace.treeError}
           onRetry={workspace.reloadTree}
           onSelect={workspace.selectPath}
+          indexStatus={workspace.indexStatus}
+          onDelete={workspace.deleteDocument}
         />
       </aside>
 
@@ -112,6 +112,8 @@ export function DocumentRoute() {
           onRetry={workspace.reloadDoc}
           target={workspace.target}
           onCitationJump={workspace.jumpToCitation}
+          onOpenPath={workspace.selectPath}
+          wikilinkIndex={workspace.wikilinkIndex}
         />
       </section>
 
@@ -120,7 +122,9 @@ export function DocumentRoute() {
           messages={workspace.messages}
           onSend={workspace.sendMessage}
           isStreaming={workspace.isStreaming}
+          onStop={workspace.stopStreaming}
           onCitationJump={workspace.jumpToCitation}
+          messageErrors={workspace.messageErrors}
         />
       </aside>
 

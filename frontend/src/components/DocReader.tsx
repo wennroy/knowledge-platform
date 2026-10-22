@@ -1,22 +1,19 @@
-import { Children, isValidElement, useEffect, useMemo, useRef, useState } from 'react'
-import Markdown, { type Components } from 'react-markdown'
-import rehypeKatex from 'rehype-katex'
-import remarkGfm from 'remark-gfm'
-import remarkMath from 'remark-math'
+import { useEffect, useRef, useState } from 'react'
 import 'katex/dist/katex.min.css'
 
 import type { Citation, FileDoc } from '../api/types'
 import type { LoadStatus } from '../lib/load'
+import { applyMark } from '../lib/reader-mark'
+import type { WikilinkIndex } from '../lib/wikilink-index'
 import {
   clearMarks,
   deriveHeading,
   findHeadingElement,
   findTextRange,
-  markRange,
   resolveRange,
   type DocTarget,
 } from '../lib/reader-target'
-import { CodeBlock } from './CodeBlock'
+import { DocMarkdown } from './DocMarkdown'
 import { DocToc, type TocItem } from './DocToc'
 
 export interface DocReaderProps {
@@ -37,9 +34,39 @@ export interface DocReaderProps {
    * link rendering itself is not part of this batch).
    */
   onCitationJump: (citation: Citation) => void
+  /** Called when a `[[wikilink]]` is clicked — opens that document. */
+  onOpenPath: (path: string) => void
+  /** Maps a wikilink target onto a vault path. */
+  wikilinkIndex: WikilinkIndex
 }
 
 const MARK_CLASS = 'reader-mark'
+
+/**
+ * Find a quoted passage that is only a part of a larger chunk.
+ *
+ * The chunker merges the paragraphs of a section, so the quoted text may
+ * span several paragraphs — and the rendered document puts the headings
+ * between them, which breaks a contiguous match. In that case the first
+ * paragraph of the quote is located on its own.
+ */
+function findParagraphRange(
+  root: HTMLElement,
+  quoted: string,
+  after?: Element | null,
+): Range | null {
+  const paragraphs = quoted
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+  for (const paragraph of paragraphs) {
+    const range = findTextRange(root, paragraph, after)
+    if (range) {
+      return range
+    }
+  }
+  return null
+}
 
 /** Frontmatter tags are free-form — coerce them into a list of strings. */
 function readTags(frontmatter: Record<string, unknown>): string[] {
@@ -69,6 +96,8 @@ export function DocReader({
   error,
   onRetry,
   target,
+  onOpenPath,
+  wikilinkIndex,
 }: DocReaderProps) {
   const articleRef = useRef<HTMLElement>(null)
   const [toc, setToc] = useState<TocItem[]>([])
@@ -114,14 +143,21 @@ export function DocReader({
     const range = resolveRange(doc.content, target)
     const quoted =
       target.text ?? (range ? doc.content.slice(range.start, range.end) : '')
-    const headingText = range ? deriveHeading(doc.content, range.start) : null
+    // The chunker labels a chunk with the heading of its *last* segment, so
+    // the end offset points at the section the citation really belongs to.
+    const headingText = range
+      ? (deriveHeading(doc.content, range.end) ??
+        deriveHeading(doc.content, range.start))
+      : null
     const heading = headingText
       ? findHeadingElement(article, headingText)
       : null
-    const hit = findTextRange(article, quoted, heading)
+    const hit =
+      findTextRange(article, quoted, heading) ??
+      findParagraphRange(article, quoted, heading)
 
     if (target.mode === 'exact' && hit) {
-      markRange(hit, MARK_CLASS)
+      applyMark(hit, MARK_CLASS)
       hit.startContainer.parentElement?.scrollIntoView({
         behavior: 'smooth',
         block: 'center',
@@ -137,7 +173,7 @@ export function DocReader({
       heading.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }
     if (hit) {
-      markRange(hit, MARK_CLASS)
+      applyMark(hit, MARK_CLASS)
     }
     setLocated(
       hit
@@ -146,46 +182,10 @@ export function DocReader({
           ? '已定位到所属章节（原文片段未能精确匹配）'
           : '未能定位到引用片段，已显示完整文档',
     )
-  }, [doc, target])
-
-  const components = useMemo<Components>(
-    () => ({
-      // A fenced code block arrives as <pre><code class="language-x">…</code></pre>.
-      // We take the block over completely so we can render shiki tokens.
-      pre: (props) => {
-        if (Children.count(props.children) !== 1) {
-          return <pre>{props.children}</pre>
-        }
-        const child = Children.only(props.children)
-        if (!isValidElement(child)) {
-          return <pre>{props.children}</pre>
-        }
-        const childProps = child.props as {
-          className?: string
-          children?: unknown
-        }
-        const className = childProps.className ?? ''
-        const lang = /language-([\w+#.-]+)/.exec(className)?.[1]
-        const code =
-          typeof childProps.children === 'string' ? childProps.children : ''
-        return (
-          <CodeBlock code={code.replace(/\n$/, '')} lang={lang} />
-        )
-      },
-      // Inline code keeps the default look.
-      code: (props) => {
-        const { node: _node, className, children, ...rest } = props
-        return (
-          <code className={className} {...rest}>
-            {children}
-          </code>
-        )
-      },
-    }),
-    [],
-  )
+  }, [doc, target, wikilinkIndex])
 
   const tags = doc ? readTags(doc.frontmatter) : []
+
 
   return (
     <div className="doc-reader">
@@ -256,13 +256,11 @@ export function DocReader({
 
       <article className="markdown-body" ref={articleRef}>
         {doc ? (
-          <Markdown
-            remarkPlugins={[remarkGfm, remarkMath]}
-            rehypePlugins={[rehypeKatex]}
-            components={components}
-          >
-            {doc.content}
-          </Markdown>
+          <DocMarkdown
+            content={doc.content}
+            wikilinkIndex={wikilinkIndex}
+            onOpenPath={onOpenPath}
+          />
         ) : status === 'idle' ? (
           <p className="empty-hint">从左侧选择一个文档开始阅读。</p>
         ) : null}

@@ -31,6 +31,10 @@ class ParseResult(BaseModel):
 class IndexStatus(BaseModel):
     file_path: str
     file_hash: str
+    #: sha256 of the original uploaded bytes. Distinct from ``file_hash``,
+    #: which is the sha256 of the *parsed markdown*. The upload endpoint
+    #: compares this to detect duplicate uploads.
+    source_hash: str = ""
     chunk_count: int
     status: str  # "ok" | "failed" | "pending"
     updated_at: str

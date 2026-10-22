@@ -13,6 +13,10 @@ import { WorkspaceProvider } from './workspace'
  * `/app/doc/*` is the deep link to a single document — the splat carries the
  * vault-relative path (`/app/doc/team/api-design.md`). The reader picks it
  * up and opens that document, also after a full page reload.
+ *
+ * `/app/graph` is the knowledge graph. It is a route of *this* SPA — the
+ * standalone `graph-viewer/` app is superseded. The graph API itself stays
+ * on the root path (`/graph`), which the backend mounts there.
  */
 export function AppRoutes() {
   return (

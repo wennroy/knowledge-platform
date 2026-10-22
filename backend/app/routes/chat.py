@@ -101,12 +101,145 @@ def _error_payload(message: str, err_type: str = "server_error") -> dict[str, An
 
 
 # ---------------------------------------------------------------- streaming
+def _is_droppable_payload(payload: bytes) -> bool:
+    """True for SSE payloads this backend must not forward.
+
+    Two cases:
+
+    * ``[DONE]`` — the gateway terminates its own stream; we emit our own
+      ``[DONE]`` at the end, so forwarding the gateway's would give the
+      client two end-of-stream markers (and the client would stop before it
+      ever sees our references event).
+    * a JSON object with ``type == "references"`` — the gateway may emit its
+      own citations; forwarding them next to ours would produce two reference
+      lists with conflicting numbering.
+
+    Everything else (including non-JSON payloads) is forwarded untouched.
+    """
+    text = payload.strip()
+    if not text:
+        return False
+    if text == b"[DONE]":
+        return True
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(parsed, dict) and parsed.get("type") == "references"
+
+
+def _split_sse_lines(buf: bytes) -> tuple[list[tuple[bytes, bytes]], bytes]:
+    """Split ``buf`` into complete SSE lines plus the trailing remainder.
+
+    Each line is returned as ``(raw_bytes, content)`` where ``raw_bytes``
+    keeps the original line terminator — forwarded frames are re-assembled
+    from the raw bytes, so the gateway's framing is preserved byte for byte.
+    """
+    records: list[tuple[bytes, bytes]] = []
+    start = 0
+    while True:
+        idx = buf.find(b"\n", start)
+        if idx == -1:
+            break
+        raw = buf[start : idx + 1]
+        content = buf[start:idx]
+        if content.endswith(b"\r"):
+            content = content[:-1]
+        records.append((raw, content))
+        start = idx + 1
+    return records, buf[start:]
+
+
+class _SseNormalizer:
+    """Filter the gateway's SSE stream into the shape this backend promises.
+
+    The gateway's stream is forwarded verbatim except for two frame kinds
+    (see :func:`_is_droppable_payload`). Frames the normaliser does not
+    recognise — comments, heartbeats, ``event:`` lines, non-JSON payloads —
+    are passed through unchanged.
+    """
+
+    def __init__(self) -> None:
+        self._buf = b""
+        self._frame: list[tuple[bytes, bytes]] = []
+
+    @staticmethod
+    def _render(frame: list[tuple[bytes, bytes]], boundary: bytes) -> bytes:
+        kept: list[bytes] = []
+        for raw, content in frame:
+            if content.startswith(b"data:"):
+                payload = content[len(b"data:") :]
+                if payload.startswith(b" "):
+                    payload = payload[1:]
+                if _is_droppable_payload(payload):
+                    continue
+            kept.append(raw)
+        if not kept:
+            return b""
+        return b"".join(kept) + boundary
+
+    def feed(self, chunk: bytes) -> bytes:
+        """Consume a chunk of gateway bytes, return the bytes to forward."""
+        if not chunk:
+            return b""
+        self._buf += chunk
+        records, self._buf = _split_sse_lines(self._buf)
+        out: list[bytes] = []
+        for raw, content in records:
+            if content == b"":
+                # Blank line — end of the current SSE frame.
+                piece = self._render(self._frame, raw)
+                self._frame = []
+                if piece:
+                    out.append(piece)
+            else:
+                self._frame.append((raw, content))
+        return b"".join(out)
+
+    def flush(self) -> bytes:
+        """Forward whatever is left once the gateway stream ended."""
+        if self._buf:
+            content = self._buf[:-1] if self._buf.endswith(b"\r") else self._buf
+            self._frame.append((self._buf, content))
+            self._buf = b""
+        if not self._frame:
+            return b""
+        piece = self._render(self._frame, b"")
+        self._frame = []
+        return piece
+
+
+def normalize_sse(data: bytes) -> bytes:
+    """Normalise a complete SSE buffer (used by the tests and for debugging)."""
+    normalizer = _SseNormalizer()
+    return normalizer.feed(data) + normalizer.flush()
+
+
+async def _iter_normalized_sse(response: httpx.Response) -> AsyncIterator[bytes]:
+    """Stream the gateway's SSE body through the normaliser."""
+    normalizer = _SseNormalizer()
+    async for chunk in response.aiter_bytes():
+        if not chunk:
+            continue
+        piece = normalizer.feed(chunk)
+        if piece:
+            yield piece
+    piece = normalizer.flush()
+    if piece:
+        yield piece
+
+
 async def _stream_gateway(
     client: httpx.AsyncClient,
     payload: dict[str, Any],
     results: list[RetrievalResult],
 ) -> AsyncIterator[bytes]:
     """Forward SSE bytes from the gateway, then append the references tail.
+
+    The gateway's frames are forwarded verbatim except for its ``[DONE]``
+    marker and its own ``references`` events (see :class:`_SseNormalizer`),
+    so the client sees exactly one ``[DONE]`` and exactly one references
+    event — the one this backend appends.
 
     On upstream errors we yield an OpenAI-style error event followed by
     ``[DONE]`` rather than raising — streaming responses have already
@@ -149,9 +282,9 @@ async def _stream_gateway(
             )
             yield b"data: [DONE]\n\n"
             return
-        async for chunk in response.aiter_bytes():
-            if chunk:
-                yield chunk
+        async for piece in _iter_normalized_sse(response):
+            if piece:
+                yield piece
     finally:
         await response.aclose()
 

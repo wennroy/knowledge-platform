@@ -20,6 +20,7 @@ import json
 import logging
 import time
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -87,15 +88,17 @@ class Retriever:
 
         try:
             try:
-                arr = asyncio.run(_run())
+                asyncio.get_running_loop()
             except RuntimeError:
-                # Already inside an event loop (FastAPI route). Run in a worker
-                # thread so the retry sleeps don't block the loop.
-                import concurrent.futures
-
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                    fut = ex.submit(lambda: asyncio.run(_run()))
-                    arr = fut.result()
+                # No event loop in this thread — run it here.
+                arr = asyncio.run(_run())
+            else:
+                # A loop is already running (FastAPI route). asyncio.run()
+                # would raise *and* leave the coroutine unawaited, which
+                # logs a "coroutine was never awaited" RuntimeWarning on
+                # every single query. Run it on a worker thread instead.
+                with ThreadPoolExecutor(max_workers=1) as ex:
+                    arr = ex.submit(lambda: asyncio.run(_run())).result()
         except Exception as exc:
             raise RetrieverError(f"query embedding failed: {exc}") from exc
 

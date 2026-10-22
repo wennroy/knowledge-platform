@@ -4,6 +4,13 @@
 # Caddy obtains and renews certificates automatically when the hostnames
 # below resolve to this server's public IP.
 #
+# Entry points:
+#   /app/*       the unified frontend (document tree + reader + AI chat)
+#   /app/graph   the knowledge graph (force-directed canvas)
+#   /v1/*        the backend API
+#   /graph       the knowledge-graph API (JSON)
+#   /open-webui/ Open WebUI — optional fallback, not the default entry point
+#
 # Authentication and tunnel exposure (Basic Auth / Cloudflare Tunnel / etc.)
 # are intentionally left to the operator to choose. Common choices:
 #   - Cloudflare Tunnel: terminates TLS at the edge; point the tunnel
@@ -13,43 +20,66 @@
 
 # ---------- public HTTPS ----------
 example.com, www.example.com {
-    encode zstd gzip
+	encode zstd gzip
 
-    # F-02 fix: enforce an authentication baseline.
-    # Choose ONE of the two auth layers below by uncommenting:
-    #
-    # (1) Basic Auth — set Caddy_Basicauth_Hash in the environment, e.g.:
-    #       docker run -e Caddy_Basicauth_Hash=$(caddy hash-password --plaintext 'secret')
-    #     then this block authenticates every request:
-    basicauth {
-        {$Caddy_Basicauth_Hash}
-    }
-    #
-    # (2) IP allowlist — only useful on a private network:
-    #     @blocked not remote_ip 10.0.0.0/8 192.168.0.0/16 172.16.0.0/12
-    #     respond @blocked "Forbidden" 403
-    #
-    # In both cases the /healthz probe is left open so orchestrators can
-    # reach it without credentials.
+	# F-02 fix: enforce an authentication baseline.
+	# Choose ONE of the two auth layers below by uncommenting:
+	#
+	# (1) Basic Auth — set Caddy_Basicauth_Hash in the environment, e.g.:
+	#       docker run -e Caddy_Basicauth_Hash=$(caddy hash-password --plaintext 'secret')
+	#     then this block authenticates every request:
+	basicauth {
+		{$Caddy_Basicauth_Hash}
+	}
+	#
+	# (2) IP allowlist — only useful on a private network:
+	#     @blocked not remote_ip 10.0.0.0/8 192.168.0.0/16 172.16.0.0/12
+	#     respond @blocked "Forbidden" 403
+	#
+	# In both cases the /healthz probe is left open so orchestrators can
+	# reach it without credentials.
 
-    # Open WebUI (chat UI)
-    reverse_proxy open-webui:8080
+	# The unified frontend SPA — FastAPI serves the build output and
+	# falls back to index.html for the client-side routes (/app/graph, ...).
+	handle /app/* {
+		reverse_proxy backend:8000
+	}
 
-    # Knowledge platform backend routes
-    reverse_proxy /v1/*       backend:8000
-    reverse_proxy /admin/*    backend:8000
-    reverse_proxy /metrics    backend:8000
-    reverse_proxy /healthz    backend:8000 {
-        # Health probe bypasses auth so orchestrators don't need creds.
-    }
-    reverse_proxy /static/graph/* backend:8000
+	# Knowledge platform backend routes
+	handle /v1/* {
+		reverse_proxy backend:8000
+	}
+	handle /admin/* {
+		reverse_proxy backend:8000
+	}
+	handle /metrics {
+		reverse_proxy backend:8000
+	}
+	handle /healthz {
+		reverse_proxy backend:8000 {
+			# Health probe bypasses auth so orchestrators don't need creds.
+		}
+	}
 
-    # Graph viewer SPA + its data API both fall under /graph.
-    handle /graph* {
-        reverse_proxy backend:8000
-    }
+	# Knowledge-graph data API. The SPA route lives under /app/graph.
+	handle /graph* {
+		reverse_proxy backend:8000
+	}
 
-    # Optional: tighten CSP / IP allowlist etc. here.
+	# Legacy static assets of the old standalone graph viewer.
+	handle /static/graph/* {
+		reverse_proxy backend:8000
+	}
+
+	# Open WebUI — optional fallback (multi-provider / agent scenarios).
+	handle /open-webui/* {
+		reverse_proxy open-webui:8080
+	}
+
+	# Everything else lands on the unified frontend.
+	handle {
+		redir /app/ 302
+	}
 }
 
 # ---------- plaintext :80 ----------
@@ -57,18 +87,23 @@ example.com, www.example.com {
 # A bare :80 listener is sufficient for ACME http-01 challenges and for
 # tunneling clients that terminate TLS upstream (e.g. cloudflared).
 :80 {
-    # Health probe for the platform itself.
-    reverse_proxy /healthz backend:8000
+	# Health probe for the platform itself.
+	reverse_proxy /healthz backend:8000
 
-    # Tunnel target for Open WebUI (when the edge does TLS).
-    reverse_proxy open-webui:8080
+	# The unified frontend SPA.
+	reverse_proxy /app/* backend:8000
 
-    # Tunnels for the backend API/UI routes.
-    reverse_proxy /v1/*    backend:8000
-    reverse_proxy /admin/* backend:8000
-    reverse_proxy /metrics backend:8000
-    reverse_proxy /static/graph/* backend:8000
-    handle /graph* {
-        reverse_proxy backend:8000
-    }
+	# Tunnels for the backend API/UI routes.
+	reverse_proxy /v1/* backend:8000
+	reverse_proxy /admin/* backend:8000
+	reverse_proxy /metrics backend:8000
+	reverse_proxy /static/graph/* backend:8000
+	handle /graph* {
+		reverse_proxy backend:8000
+	}
+
+	# Open WebUI — optional fallback.
+	handle /open-webui/* {
+		reverse_proxy open-webui:8080
+	}
 }

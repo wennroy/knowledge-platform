@@ -13,11 +13,37 @@ def test_save_staging_writes_file_with_sha_name(tmp_path: Path):
     data = b"hello world"
     target = vault.save_staging(data, "greeting.txt", vault_path=vault_path)
     assert target.exists()
-    assert target.name == hashlib.sha256(data).hexdigest()
+    # The digest is the file stem; the original extension is kept so that
+    # converters can sniff the format (a bare "<digest>" is rejected).
+    digest = hashlib.sha256(data).hexdigest()
+    assert target.stem == digest
+    assert target.suffix == ".txt"
     assert target.read_bytes() == data
     # Sidecar metadata exists
-    sidecar = vault_path / vault.STAGING_DIRNAME / f"{target.name}.meta.json"
+    sidecar = vault_path / vault.STAGING_DIRNAME / f"{digest}.meta.json"
     assert sidecar.exists()
+
+
+def test_save_staging_keeps_extension_for_markitdown(tmp_path: Path):
+    """The staged file must carry the extension or parsing fails.
+
+    Regression: staging wrote a bare "<digest>" file, so MarkItDown could
+    not detect the type, produced <200 chars of output, and the Docling
+    fallback rejected the file with "File format not allowed".
+    """
+    vault_path = tmp_path / "vault"
+    target = vault.save_staging(b"# hi\n", "note.md", vault_path=vault_path)
+    assert target.suffix == ".md"
+    assert target.name.endswith(".md")
+
+
+def test_save_staging_without_extension_falls_back_to_plain_digest(tmp_path: Path):
+    vault_path = tmp_path / "vault"
+    import hashlib
+
+    data = b"no extension here"
+    target = vault.save_staging(data, "README", vault_path=vault_path)
+    assert target.name == hashlib.sha256(data).hexdigest()
 
 
 def test_write_md_injects_frontmatter(tmp_path: Path):
