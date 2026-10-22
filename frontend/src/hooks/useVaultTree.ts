@@ -25,16 +25,27 @@ export function useVaultTree(): VaultTree {
   const [treeStatus, setTreeStatus] = useState<LoadStatus>('loading')
   const [treeError, setTreeError] = useState<string | null>(null)
   const requestedRef = useRef(false)
+  // Sequence guard: a refresh (e.g. after an upload) starts a new request
+  // while the previous one may still be in flight. Without this, the stale
+  // response could land last and roll the tree back to its pre-upload state.
+  const seqRef = useRef(0)
 
   const reloadTree = useCallback(() => {
+    const seq = ++seqRef.current
     setTreeStatus('loading')
     setTreeError(null)
     getTree()
       .then((nodes) => {
+        if (seq !== seqRef.current) {
+          return
+        }
         setTree(nodes)
         setTreeStatus('ready')
       })
       .catch((error: unknown) => {
+        if (seq !== seqRef.current) {
+          return
+        }
         setTree([])
         setTreeStatus('error')
         setTreeError(errorMessage(error, '读取文档树失败'))

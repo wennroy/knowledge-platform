@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -97,8 +97,14 @@ if _APP_DIR.is_dir():
     @app.get("/app/{spa_path:path}", include_in_schema=False)
     async def app_spa(spa_path: str) -> FileResponse:
         candidate = (_APP_DIR / spa_path).resolve()
-        if str(candidate).startswith(str(_APP_DIR)) and candidate.is_file():
+        if candidate.is_relative_to(_APP_DIR) and candidate.is_file():
             return FileResponse(candidate)
+        # A request for a *file* (it has an extension) must not be answered
+        # with index.html: a stale cached index.html can reference a bundle
+        # that no longer exists, and serving HTML for it makes the browser
+        # fail with a MIME error instead of a clear 404.
+        if PurePosixPath(spa_path).suffix:
+            raise HTTPException(status_code=404, detail="asset not found")
         index = _APP_DIR / "index.html"
         if index.exists():
             return FileResponse(index)

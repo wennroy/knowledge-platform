@@ -240,3 +240,36 @@ def test_gateway_error_yields_error_event_and_single_done(
     assert not any(
         isinstance(p, dict) and p.get("type") == "references" for p in payloads
     )
+
+
+class TestMultiLineDataFrames:
+    """A frame may carry several ``data:`` lines; the payloads are joined
+    with a newline to form the event data (SSE spec). The whole payload
+    must be assembled before it is classified — judging line by line let a
+    multi-line JSON references frame through next to our own.
+    """
+
+    def test_multiline_references_frame_is_dropped(self):
+        from app.routes.chat import normalize_sse
+
+        raw = (
+            b'data: {"type":\n'
+            b'data: "references",\n'
+            b'data: "references":[{"file_path":"gw.md"}]}\n'
+            b"\n"
+        )
+        out = normalize_sse(raw)
+        assert out == b"", f"multi-line references leaked: {out!r}"
+
+    def test_multiline_non_done_frame_is_forwarded(self):
+        from app.routes.chat import normalize_sse
+
+        raw = b"data: [DO\ndata: NE]\n\n"
+        # Not valid JSON and not exactly "[DONE]" — forwarded as-is.
+        assert normalize_sse(raw) == raw
+
+    def test_multiline_delta_frame_is_forwarded_verbatim(self):
+        from app.routes.chat import normalize_sse
+
+        raw = b'data: {"choices":\ndata: [{"delta":{"content":"hi"}}]}\n\n'
+        assert normalize_sse(raw) == raw

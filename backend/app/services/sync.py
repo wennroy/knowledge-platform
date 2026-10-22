@@ -13,7 +13,7 @@ from watchdog.observers import Observer
 
 from app.config import get_settings
 from app.services.indexer import LanceIndexer
-from app.services.vault import list_vault, read_md
+from app.services.vault import FAILED_DIRNAME, STAGING_DIRNAME, list_vault, read_md
 
 log = logging.getLogger(__name__)
 
@@ -156,31 +156,46 @@ class _Handler(FileSystemEventHandler):
     def __init__(self, parent: VaultIndexer) -> None:
         self.parent = parent
 
+    @staticmethod
+    def _is_vault_doc(path: str) -> bool:
+        """Only real vault documents — never the staging area.
+
+        The staging directory holds a full copy of every upload under its
+        original name, and since ``save_staging`` keeps the extension those
+        copies end with ``.md``. Without this filter the watchdog indexes
+        them: the content is embedded twice and the index gains rows whose
+        ``file_path`` points at a scratch file that is deleted moments later.
+        """
+        if not path.endswith(".md"):
+            return False
+        parts = Path(path).parts
+        return STAGING_DIRNAME not in parts and FAILED_DIRNAME not in parts
+
     def on_modified(self, event):  # type: ignore[override]
         if event.is_directory:
             return
-        if not event.src_path.endswith(".md"):
+        if not self._is_vault_doc(event.src_path):
             return
         self.parent._enqueue(Path(event.src_path))
 
     def on_created(self, event):  # type: ignore[override]
         if event.is_directory:
             return
-        if not event.src_path.endswith(".md"):
+        if not self._is_vault_doc(event.src_path):
             return
         self.parent._enqueue(Path(event.src_path))
 
     def on_deleted(self, event):  # type: ignore[override]
         if event.is_directory:
             return
-        if not event.src_path.endswith(".md"):
+        if not self._is_vault_doc(event.src_path):
             return
         self.parent._enqueue(Path(event.src_path))
 
     def on_moved(self, event):  # type: ignore[override]
         if event.is_directory:
             return
-        if not event.src_path.endswith(".md"):
+        if not self._is_vault_doc(event.dest_path):
             return
         self.parent._enqueue(Path(event.dest_path))
 

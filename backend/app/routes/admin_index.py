@@ -62,7 +62,9 @@ async def reindex_file(
     """Re-index a single markdown file by path (relative to vault)."""
     base = get_settings().vault_path()
     target = (base / body.path).resolve()
-    if not str(target).startswith(str(base)):
+    # `is_relative_to` rather than a string prefix — see the note in
+    # `routes/files.py`.
+    if not target.is_relative_to(base):
         raise HTTPException(status_code=400, detail="path escapes vault")
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="file not found")

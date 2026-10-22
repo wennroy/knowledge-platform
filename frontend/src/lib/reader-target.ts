@@ -181,18 +181,6 @@ export function findTextRange(
   return range
 }
 
-/** Wrap a range in a `<mark>`; returns the element, or `null` on failure. */
-export function markRange(range: Range, className: string): HTMLElement | null {
-  try {
-    const mark = document.createElement('mark')
-    mark.className = className
-    range.surroundContents(mark)
-    return mark
-  } catch {
-    return null
-  }
-}
-
 /** Remove every `<mark class="...">` we added earlier. */
 export function clearMarks(root: HTMLElement, className: string): void {
   const marks = Array.from(root.querySelectorAll(`mark.${className}`))

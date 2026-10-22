@@ -165,18 +165,21 @@ class _SseNormalizer:
 
     @staticmethod
     def _render(frame: list[tuple[bytes, bytes]], boundary: bytes) -> bytes:
-        kept: list[bytes] = []
-        for raw, content in frame:
+        # SSE spec: a frame may carry several ``data:`` lines, whose payloads
+        # are joined with "\n" to form the event data. The whole payload must
+        # be assembled before it can be classified — judging each line on its
+        # own would let a multi-line JSON ``references`` frame slip through
+        # and reach the client next to our own.
+        data_payloads: list[bytes] = []
+        for _raw, content in frame:
             if content.startswith(b"data:"):
                 payload = content[len(b"data:") :]
                 if payload.startswith(b" "):
                     payload = payload[1:]
-                if _is_droppable_payload(payload):
-                    continue
-            kept.append(raw)
-        if not kept:
+                data_payloads.append(payload)
+        if data_payloads and _is_droppable_payload(b"\n".join(data_payloads)):
             return b""
-        return b"".join(kept) + boundary
+        return b"".join(raw for raw, _content in frame) + boundary
 
     def feed(self, chunk: bytes) -> bytes:
         """Consume a chunk of gateway bytes, return the bytes to forward."""

@@ -75,7 +75,10 @@ def _safe_target(base: Path, relative_path: str) -> Path:
     still inside the vault root.
     """
     target = (base / relative_path).resolve()
-    if not str(target).startswith(str(base)):
+    # `is_relative_to` rather than a string prefix: a sibling directory
+    # whose name starts with the vault's name (e.g. `vault_secret` next
+    # to `vault`) would pass a `startswith` check.
+    if not target.is_relative_to(base):
         raise HTTPException(status_code=400, detail="path escapes vault")
     return target
 
@@ -143,6 +146,10 @@ async def upload_file(
             from app.metrics import kb_index_files_total
 
             kb_index_files_total.labels(status="skipped").inc()
+            # The staged copy is redundant here — the document is already in
+            # the vault. Leaving it behind would duplicate the upload on
+            # every duplicate submission.
+            _discard_staged(staged, vault_path=_vault_base())
             return UploadResponse(
                 id=file_hash,
                 status="skipped",

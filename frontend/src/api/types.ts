@@ -91,6 +91,11 @@ export interface UploadResponse {
 export interface IndexStatus {
   file_path: string
   file_hash: string
+  /**
+   * sha256 of the original uploaded bytes — distinct from `file_hash`
+   * (the sha256 of the parsed markdown). Used for upload deduplication.
+   */
+  source_hash?: string
   chunk_count: number
   status: string
   updated_at: string
