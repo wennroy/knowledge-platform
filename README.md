@@ -135,10 +135,21 @@ tags: [api, backend]
 ## 开发
 
 ```bash
+# 后端
 cd backend
-pytest -q          # 88 tests（52 单测 + 36 E2E）
-ruff check app/
+pytest -q          # 151 tests
+ruff check app/ tests/
+
+# 前端
+cd frontend
+npm ci
+npm run test:run   # 115 tests
+npm run build      # tsc --noEmit + vite build
 ```
+
+> **改了前端源码后，必须重新 `npm run build` 并提交 `backend/app/static/app/`。**
+> 构建产物是签入仓库的（Docker 镜像直接带它），CI 有一个 job 专门校验
+> 产物与源码一致 —— 忘记提交产物，CI 会失败。
 
 ## 文档
 

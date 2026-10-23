@@ -16,7 +16,7 @@ uvicorn app.main:app --reload --port 8000
 ## 测试
 
 ```bash
-pytest -q          # 88 tests
+pytest -q          # 151 tests
 ruff check app/ tests/
 ```
 
